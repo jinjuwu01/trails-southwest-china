@@ -24,9 +24,9 @@ On the 23rd day of the 4th month, 1638, Xu Xiake travelled west from Zhenning, p
 | L | 切换中英文 · switch language |
 | B | 背景音乐开关 · music on / off |
 
-手机和平板上用屏幕摇杆和按钮。需要支持 WebGL2 的浏览器（Chrome、Edge、Firefox、Safari 新版）。网页约 7 MB。
+手机和平板上用屏幕摇杆和按钮。需要支持 WebGL2 的浏览器（Chrome、Edge、Firefox、Safari 新版）。详细人物模型在后台加载。
 
-On phones and tablets, use the on-screen stick and buttons. Needs a browser with WebGL2 (recent Chrome, Edge, Firefox or Safari). The page is about 7 MB.
+On phones and tablets, use the on-screen stick and buttons. Needs a browser with WebGL2 (recent Chrome, Edge, Firefox or Safari). Detailed character models load in the background.
 
 ### 说明 · About this prototype
 
