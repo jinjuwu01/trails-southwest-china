@@ -700,7 +700,7 @@ const sD = river.pts[river.at[RI_D]].s, sL = river.pts[river.at[RI_L]].s;
 const road = buildCurve(ROAD_CP, 2);
 const roadG = segGrid(road.pts, 14, 32);
 const paths = PATHS_CP.map(p => { const c = buildCurve(p.cp, 1.5); c.hw = p.hw; c.grade = p.grade; c.name = p.name; c.cp = p.cp; c.g = segGrid(c.pts, 8, 32); return c; });
-const NRv = {}, NRr = {}, NRp = {};
+const NRv = {}, NRr = {}, NRp = {}, NRt = {};
 
 // 白虹桥：沿驿道的一段
 const BRIDGE = (() => {
@@ -761,7 +761,14 @@ const towers = [];
       t.base = { r: t.r * 1.18, h: t.h * 0.13 };
     }
     let ext = t.r * 1.3;
-    for (const p of t.peaks) ext = Math.max(ext, Math.hypot(p.x - t.x, p.z - t.z) + p.r * 1.3);
+    for (const p of t.peaks) {
+      const i = Math.floor(p.x), j = Math.floor(p.z);
+      p.aspect = 0.7 + 0.26 * hash2(i + 18, j - 29);
+      p.crown = 0.26 + 0.72 * hash2(i - 41, j + 53);
+      p.lean = 0.25 + 0.64 * hash2(i + 13, j + 77);
+      p.dirX = Math.cos(p.ph); p.dirZ = Math.sin(p.ph);
+      ext = Math.max(ext, Math.hypot(p.x - t.x, p.z - t.z) + p.r * 1.3);
+    }
     t.ext = ext + 9;
   }
 })();
@@ -780,6 +787,7 @@ function towerAt(x, z) {
   if (ci < 0 || cj < 0 || ci >= towerGrid.nx || cj >= towerGrid.nx) return 0;
   const list = towerGrid.cells[cj * towerGrid.nx + ci];
   if (!list.length) return 0;
+  const roadBlend = smooth(6, 14, nearest(road, roadG, x, z, NRt).d);
   const wx = x + 7 * vnoise(x / 37 + 3.3, z / 37 - 1.7), wz = z + 7 * vnoise(x / 37 - 8.1, z / 37 + 5.9);
   const rough = 0.93 + 0.07 * vnoise(x / 6, z / 6);
   let best = 0;
@@ -793,7 +801,17 @@ function towerAt(x, z) {
       if (d >= rr) continue;
       const u = d / rr;
       if (p.old) add(p.h * Math.pow(1 - u * u, 0.75) * rough * (0.88 + 0.12 * Math.cos(u * 2.2)));
-      else add(p.h * Math.pow(1 - Math.pow(u, 2.2), 1.2) * rough);
+      else if (t.peak || roadBlend === 0) add(p.h * Math.pow(1 - Math.pow(u, 2.2), 1.2) * rough);
+      else {
+        // 非主峰的山脊有走向，两侧坡面不等宽，山脚仍接回原地形。
+        const along = (dx * p.dirX + dz * p.dirZ) / rr;
+        const across = (dz * p.dirX - dx * p.dirZ) / (rr * p.aspect);
+        const r = Math.min(1, Math.sqrt(along * along + across * across));
+        const v = r + p.lean * along * (1 - r);
+        const profile = Math.pow((1 - v) * (1 + p.crown * v), 1.16);
+        const height = roadBlend === 1 ? profile : lerp(Math.pow(1 - Math.pow(u, 2.2), 1.2), profile, roadBlend);
+        add(p.h * height * rough);
+      }
     }
     if (t.base) { const d = Math.hypot(wx - t.x, wz - t.z) / t.base.r; if (d < 1) add(t.base.h * Math.pow(1 - d * d, 1.5)); }
   }
@@ -1032,26 +1050,57 @@ const RIVER_OUT = (() => {
   }
   return out;
 })();
+const FAR = { S: 28, R: 4200, n: 0, g: null };
+const FAR_CELL = 245, FAR_OFFSET = Math.ceil(FAR.R / FAR_CELL) + 2, FAR_COLS = 2 * FAR_OFFSET + 1;
+const farClusters = (() => {
+  const groups = new Array(FAR_COLS * FAR_COLS).fill(null);
+  const r = rng(411638);
+  const peak = (x, z, length, width, h, angle) => ({
+    x, z, h, invLength: 1 / length, invWidth: 1 / width,
+    cs: Math.cos(angle), sn: Math.sin(angle), round: 0.22 + 0.65 * r(), bend: (r() - 0.5) * 0.42,
+  });
+  for (let j = -FAR_OFFSET; j <= FAR_OFFSET; j++) for (let i = -FAR_OFFSET; i <= FAR_OFFSET; i++) {
+    const x = (i + 0.14 + 0.72 * r()) * FAR_CELL, z = (j + 0.14 + 0.72 * r()) * FAR_CELL;
+    const distance = Math.max(Math.abs(x), Math.abs(z)) - HALF;
+    const belt = fbm(i * 0.42 + 13.2, j * 0.32 - 7.5, 3);
+    if (distance < 46 || r() < 0.14 - belt * 0.16) continue;
+    const angle = TAU * r(), dx = Math.cos(angle), dz = Math.sin(angle);
+    const length = 98 + r() * 66, width = length * (0.57 + 0.36 * r());
+    const h = (80 + r() * 115) * (0.59 + 0.7 * smooth(40, 1050, distance)) * (1 + belt * 0.17);
+    const group = [peak(x, z, length, width, h, angle)];
+    // 副峰与鞍部沿山脊错开，疏密由谷地的起伏决定。
+    if (r() < 0.76 + belt * 0.14) {
+      const turn = (r() - 0.5) * 45, step = 53 + 49 * r();
+      group.push(peak(x + dx * step - dz * turn, z + dz * step + dx * turn, 56 + 38 * r(), 44 + 31 * r(), h * (0.54 + 0.33 * r()), angle + (r() - 0.5) * 1.2));
+      group.push(peak(x + dx * step * 0.45, z + dz * step * 0.45, length * 0.9, width * 0.9, h * 0.40, angle));
+    }
+    groups[(j + FAR_OFFSET) * FAR_COLS + i + FAR_OFFSET] = group;
+  }
+  return groups;
+})();
 function farRaw(x, z) {
-  let h = 36 + 16 * fbm(x / 800 + 3.1, z / 800 - 7.7, 3) + 4 * fbm(x / 150, z / 150, 2);
-  const C = 190, ci = Math.floor(x / C), cj = Math.floor(z / C);
+  let h = 36 + 26 * fbm(x / 850 + 3.1, z / 650 - 7.7, 3) + 9 * fbm(x / 225, z / 180, 2);
+  const wx = x + 20 * vnoise(x / 175 + 8.7, z / 150), wz = z + 20 * vnoise(x / 160, z / 180 - 6.1);
+  const ci = Math.floor(wx / FAR_CELL) + FAR_OFFSET, cj = Math.floor(wz / FAR_CELL) + FAR_OFFSET;
+  const rough = 0.96 + 0.04 * vnoise(x / 25, z / 24);
   let best = 0;
-  const add = (hh) => { if (hh <= 0) return; best = best > 0 ? smax(best, hh, Math.min(14, 0.4 * Math.min(best, hh))) : hh; };
   for (let dj = -1; dj <= 1; dj++) for (let di = -1; di <= 1; di++) {
-    const a = ci + di, b = cj + dj;
-    for (let q = 0; q < 2; q++) {
-      if (q === 1 && hash2(a * 5 + 3, b * 9 + 1) < 0.45) continue;
-      const px = (a + 0.12 + 0.76 * hash2(a * 7 + 1 + q * 31, b * 13 + 5)) * C, pz = (b + 0.12 + 0.76 * hash2(a * 3 + 11, b * 17 + 2 + q * 29)) * C;
-      const pe = Math.max(Math.abs(px), Math.abs(pz)) - HALF;
-      if (pe < 40) continue;
-      const g = smooth(40, 900, pe);
-      const pr = C * (q ? 0.34 : 0.5) * (0.85 + 0.45 * hash2(a + 91 + q, b - 37));
-      const ph = (60 + 130 * hash2(a - 5 + q * 7, b + 77)) * (0.5 + 0.8 * g) * (q ? 0.72 : 1);
-      const d = Math.hypot(x - px, z - pz) / pr;
-      if (d < 1) add(ph * Math.pow(1 - Math.pow(d, 2.2), 1.2) * (0.92 + 0.08 * vnoise(x / 9, z / 9)));
+    const group = farClusters[(cj + dj) * FAR_COLS + ci + di];
+    if (!group) continue;
+    for (const p of group) {
+      const dx = wx - p.x, dz = wz - p.z;
+      const across = (dz * p.cs - dx * p.sn) * p.invWidth;
+      if (Math.abs(across) >= 1) continue;
+      const along = (dx * p.cs + dz * p.sn) * p.invLength + p.bend * across * across;
+      const rr = along * along + across * across;
+      if (rr >= 1) continue;
+      const r = Math.sqrt(rr), d = lerp(r, r * r * (3 - 2 * r), p.round * 0.65);
+      const slope = (1 - d) * (1 + p.round * d);
+      const alt = p.h * slope * (0.72 + 0.28 * slope);
+      best = best > 0 ? smax(best, alt, Math.min(17, 0.42 * Math.min(best, alt))) : alt;
     }
   }
-  h += best;
+  h += best * rough;
   for (const R of RIVER_OUT) {
     const t = Math.max(0, (x - R.x) * R.dx + (z - R.z) * R.dz), d = Math.hypot(x - R.x - R.dx * t, z - R.z - R.dz * t), e = Math.max(0, d - R.w);
     const v = R.W - 0.4 + R.k * e + 0.004 * e * e;
@@ -1059,7 +1108,6 @@ function farRaw(x, z) {
   }
   return h;
 }
-const FAR = { S: 28, R: 4200, n: 0, g: null };
 function buildFarGrid() {
   const n = Math.round(2 * FAR.R / FAR.S) + 1, g = new Float32Array(n * n);
   for (let j = 0; j < n; j++) for (let i = 0; i < n; i++) {
@@ -1304,18 +1352,24 @@ void main(){
   float moss, forest, dirt; vec4 sv;
   if(uFar > 0.5){
     vec4 ft = texture(uFarT, (q + uFarR)/(2.0*uFarR));
-    vec2 nxz = ft.ba*2.0 - 1.0; Ng = normalize(vec3(nxz.x, sqrt(max(0.02, 1.0 - dot(nxz, nxz))), nxz.y));
+    vec2 nxz = ft.ba*2.0 - 1.0;
+    vec3 bakedN = vec3(nxz.x, sqrt(max(0.02, 1.0 - dot(nxz, nxz))), nxz.y);
+    Ng = normalize(mix(Ng, bakedN, 0.82));
     moss = 0.0; forest = vX.z; dirt = 1.0; sv = vec4(ft.r, ft.g, 1.0, 1.0);
   } else { moss = vX.x; forest = vX.y; dirt = vX.z; sv = svAt(q); }
   float canAO = uFar > 0.5 ? 1.0 : mix(1.0, 0.6, clamp(vX.y*1.15, 0.0, 1.0));
   float slope = 1.0 - Ng.y;
-  float rockW = uFar > 0.5 ? smoothstep(0.2, 0.42, slope + (vn(q*0.01) - 0.5)*0.25) : smoothstep(0.2, 0.4, slope + (vn(q*0.07) - 0.5)*0.2);
+  float shoulder = vn(q*0.024 + vec2(vP.y*0.018, -4.2));
+  float weathering = mix(shoulder, vn(q*0.12 + vP.y*0.041), 0.26);
+  float ledgeCover = smoothstep(0.33, 0.67, 1.0 - weathering)*(1.0 - smoothstep(0.54, 0.89, slope));
+  float rockW = smoothstep(0.21, 0.60, slope + (weathering - 0.5)*0.52)*(1.0 - ledgeCover*0.78);
   float open = (1.0 - vM.x)*(1.0 - vM.y)*(1.0 - vM.z)*(1.0 - smoothstep(0.3, 0.7, vM.w));
-  float outc = 0.0, scrub = 0.0;
+  float scrub = 0.0;
   if(uFar < 0.5){
-    outc = smoothstep(0.7, 0.8, vn(q*0.105 + 2.3)*0.62 + vn(q*0.41)*0.38 + slope*0.9 - 0.12)*open;
+    float outc = smoothstep(0.71, 0.93, weathering*0.64 + vn(q*0.41)*0.23 + slope*0.46)*open;
     rockW = max(rockW, outc);
-    scrub = smoothstep(0.55, 0.72, fbm(q*0.043 + 7.1)*0.72 + vn(q*0.23)*0.28 + slope*0.45)*open*(1.0 - rockW)*smoothstep(28.0, 70.0, dist);
+    float hillside = smoothstep(0.09, 0.33, slope) + smoothstep(42.0, 73.0, vP.y)*0.4;
+    scrub = smoothstep(0.24, 0.86, hillside)*(0.24 + 0.76*ledgeCover)*open*smoothstep(3.0, 29.0, dist);
   }
   forest *= 1.0 - rockW*0.75;
   // ---- 各材质（细节贴图 × 大尺度色调）----
@@ -1330,7 +1384,7 @@ void main(){
     D g1 = det(q*0.05, 7.0);
     can = mix(can, toLin(g1.c)*grassTint(q, 1.0)*vec3(1.1, 1.05, 0.8), fieldW);
     D r1 = det(q*0.02, 2.0);
-    vec3 rk = rockAlb(vP, Ng)*toLin(r1.c)*2.2;
+    vec3 rk = rockAlb(vP, Ng)*toLin(r1.c)*vec3(2.1, 2.19, 2.24);
     alb = mix(can, rk, wRock); dN = flat3(mix(c1.n, r1.n, wRock))*0.6; cav = mix(c1.ao, r1.ao, wRock); wsum = 1.0;
   } else {
     if(wGrass > 0.002){
@@ -1349,12 +1403,14 @@ void main(){
       alb += fc*wForest; dN += flat3(f1.n)*wForest; cav += f1.ao*wForest; wsum += wForest; }
     if(wRock > 0.002){
       vec3 bw = pow(abs(Ng), vec3(4.0)); bw /= dot(bw, vec3(1.0));
-      float bw8 = 1.6*vn(q*0.012) + 0.35*vn(q*0.05);
-      D rx = det(vec2(vP.z*0.29, vP.y*0.29 + bw8), 8.0), ry = det(vP.xz*0.29, 2.0), rz = det(vec2(vP.x*0.29, vP.y*0.29 + bw8), 8.0);
-      vec3 rc = toLin(rx.c*bw.x + ry.c*bw.y + rz.c*bw.z)*(rockAlb(vP, Ng)/toLin(vec3(0.6)));
-      rc = mix(rc, rc*vec3(0.62, 0.78, 0.52), moss*0.5);
+      float bedding = vP.y*0.22 + dot(q, vec2(0.026, -0.019)) + 1.8*shoulder + 0.45*weathering;
+      float joint = (weathering - 0.5)*0.85;
+      D rx = det(vec2(vP.z*0.24 + joint, bedding), 8.0), ry = det(q*0.24, 2.0), rz = det(vec2(vP.x*0.24 - joint, bedding), 8.0);
+      vec3 rc = toLin(rx.c*bw.x + ry.c*bw.y + rz.c*bw.z)*(0.41 + 1.45*rockAlb(vP, Ng));
+      float lichen = clamp(moss*0.55 + (1.0 - weathering)*0.21, 0.0, 0.75);
+      rc = mix(rc*vec3(0.96, 1.0, 1.02), rc*vec3(0.65, 0.78, 0.55), lichen);
       vec3 rn = vec3(0.0, rx.n.y, rx.n.x)*bw.x + vec3(ry.n.x, 0.0, ry.n.y)*bw.y + vec3(rz.n.x, rz.n.y, 0.0)*bw.z;
-      alb += rc*wRock; dN += rn*1.3*wRock; cav += (rx.ao*bw.x + ry.ao*bw.y + rz.ao*bw.z)*wRock; wsum += wRock; }
+      alb += rc*wRock; dN += rn*0.92*wRock; cav += (rx.ao*bw.x + ry.ao*bw.y + rz.ao*bw.z)*wRock; wsum += wRock; }
     alb /= max(wsum, 1e-3); dN /= max(wsum, 1e-3); cav /= max(wsum, 1e-3);
     if(wRoad > 0.002){
       D st = det(q*0.45, 3.0), so = det(q*0.6 + 0.2, 1.0);
@@ -1551,39 +1607,43 @@ float hgtAt(vec2 xz){
   float h00 = texelFetch(uHgt, i, 0).r, h10 = texelFetch(uHgt, i + ivec2(1, 0), 0).r, h01 = texelFetch(uHgt, i + ivec2(0, 1), 0).r, h11 = texelFetch(uHgt, i + ivec2(1, 1), 0).r;
   return (t.x + t.y <= 1.0) ? h00 + (h10 - h00)*t.x + (h01 - h00)*t.y : h11 + (h01 - h11)*(1.0 - t.x) + (h10 - h11)*(1.0 - t.y);
 }
-const vec3 PET[4] = vec3[4](vec3(0.84, 0.83, 0.77), vec3(0.90, 0.72, 0.16), vec3(0.54, 0.42, 0.82), vec3(0.88, 0.53, 0.66));
-const vec3 CEN[4] = vec3[4](vec3(0.96, 0.78, 0.22), vec3(0.86, 0.58, 0.10), vec3(0.96, 0.90, 0.60), vec3(0.96, 0.86, 0.52));
+const vec3 PET[4] = vec3[4](vec3(0.96, 0.94, 0.83), vec3(0.98, 0.75, 0.19), vec3(0.60, 0.49, 0.88), vec3(0.90, 0.57, 0.70));
+const vec3 CEN[4] = vec3[4](vec3(0.91, 0.66, 0.19), vec3(0.71, 0.41, 0.08), vec3(0.98, 0.86, 0.46), vec3(0.89, 0.71, 0.29));
 void main(){
   vec2 cell = uCamCell + iO;
   vec2 base = (cell + 0.5 + (vec2(h21(cell + 1.3), h21(cell + 7.9)) - 0.5)*0.8)*uGCell;
   vec2 rel = base - uCam.xz; float dist = length(rel);
-  float fade = 1.0 - smoothstep(uGR*0.7, uGR, dist);
-  if(dot(rel, uFwd.xz) < -3.0 && dist > 4.0) fade = 0.0;
+  if(dist >= uGR || (dot(rel, uFwd.xz) < -3.0 && dist > 4.0)){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  float fade = 1.0 - smoothstep(uGR*0.82, uGR, dist);
   vec2 fp = flowerPatch(base);
-  float den = texture(uGD, (base + 512.0)*uSVm.z + uSVm.w).r;
-  float keep = den*(0.06 + 0.94*fp.x)*fade;
-  if(fract(aB.y + h21(cell + 2.2)) > keep*1.15){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
-  int sp = int(fp.x > 0.05 ? fp.y : floor(h21(cell + 4.4)*3.999));
+  vec2 density = texture(uGD, (base + 512.0)*uSVm.z + uSVm.w).rg;
+  float verge = density.g*(0.35 + 1.65*vn(base*0.19 + 7.7));
+  float keep = clamp(density.r*(0.045 + 0.85*fp.x) + verge, 0.0, 1.0)*fade;
+  if(fract(aB.y + h21(cell + 2.2)) > keep){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
+  float type = h21(cell + aB.y*19.3);
+  int sp = int(type < 0.32 ? floor(h21(cell + aB.y*29.4)*3.999) : fp.y);
   float ang = h21(cell + 9.7)*6.2831, cs = cos(ang), sn = sin(ang);
   float hs = (0.75 + 0.5*h21(cell + 5.5))*(sp == 1 ? 1.15 : sp == 2 ? 0.8 : 1.0);
   vec3 lp = aP; lp.y *= hs;
   lp.xz = vec2(cs*lp.x - sn*lp.z, sn*lp.x + cs*lp.z);
   vec3 n = aN; n.xz = vec2(cs*n.x - sn*n.z, sn*n.x + cs*n.z);
-  vec2 gp = base + lp.xz;
+  vec2 gp = base + lp.xz, root = base + vec2(cs*aB.z - sn*aB.w, sn*aB.z + cs*aB.w);
   float t = aB.x, w = t*t, bh = lp.y;
-  vec3 wp = vec3(gp.x, hgtAt(base + vec2(cs*aB.z - sn*aB.w, sn*aB.z + cs*aB.w)) + bh, gp.y);
-  float gust = vn(gp*0.045 + uTime*vec2(0.33, 0.21));
-  float ph = uTime*2.1 + dot(gp, vec2(0.37, 0.23)) + aB.y*6.0;
-  vec2 wind = vec2(0.8, 0.45)*(0.25 + 0.9*gust)*(0.6 + 0.4*sin(ph));
-  wp.xz += wind*w*bh*0.9;
+  vec3 wp = vec3(gp.x, hgtAt(root) + bh, gp.y);
+  float gust = vn(root*0.045 + uTime*vec2(0.33, 0.21));
+  float phase = uTime*2.1 + dot(root, vec2(0.37, 0.23)) + aB.y*6.0;
+  vec2 wind = vec2(0.86, 0.5)*(0.15 + 0.35*gust + 0.28*sin(phase));
+  wind += vec2(-0.5, 0.86)*0.14*sin(phase*0.63 + 1.4);
+  wp.xz += wind*w*bh;
   vec2 dp = wp.xz - uPlayer.xz; float dl = length(dp);
   if(dl < 1.4 && abs(wp.y - uPlayer.y) < 2.0) wp.xz += dp/max(dl, 1e-3)*(1.4 - dl)*w*0.8;
-  wp.y -= w*bh*0.12*(gust + 0.3);
+  wp.y -= w*bh*0.15*dot(wind, wind);
   float L = length(aN), part = L < 1.5 ? 1.0 : (L < 2.5 ? 0.0 : 2.0);
   vPart = part;
   vec3 pc = PET[sp]*(0.88 + 0.24*h21(cell + aB.y*17.0));
-  vC = part < 0.5 ? vec3(0.22, 0.36, 0.13) : mix(part > 1.5 ? CEN[sp] : pc, vec3(0.34, 0.44, 0.17), smoothstep(uGR*0.3, uGR*0.85, dist)*0.75);
-  vN = part < 0.5 ? vec3(0.0, 1.0, 0.0) : normalize(n);
+  vec3 green = mix(vec3(0.23, 0.36, 0.12), vec3(0.36, 0.49, 0.20), type);
+  vC = part < 0.5 ? green : mix(part > 1.5 ? CEN[sp] : pc, green, smoothstep(uGR*0.65, uGR, dist)*0.62);
+  vN = part < 0.5 ? vec3(0.0, 1.0, 0.0) : normalize(n - vec3(wind.x, 0.0, wind.y)*L*0.35);
   vP = wp; vSV = svAt(base);
   gl_Position = uVP*vec4(wp, 1.0);
 }`,
@@ -1597,7 +1657,7 @@ void main(){
   float ndl = vPart < 0.5 ? 0.55 : clamp(dot(N, uSunDir), 0.0, 1.0)*0.7 + 0.3;
   vec3 V = normalize(uCam - vP);
   vec3 c = alb*(uSunCol*ndl*sun + hemi(N)*ao);
-  if(vPart > 0.5) c += alb*uSunCol*sun*pow(max(dot(-V, uSunDir), 0.0), 4.0)*0.12;
+  if(vPart > 0.5) c += alb*uSunCol*sun*pow(max(dot(-V, uSunDir), 0.0), 4.0)*0.16;
   o = outC(fogApply(c, vP));
 }`];
 SH.skin = [VS_HEAD + `
@@ -1925,7 +1985,7 @@ void main(){
   vec2 g = vec2(hx, hz)/(2.0*e);
   float sl = length(g);
   // 坡上加冲沟与棱线的细节（只改法线）
-  float k = 6.0*smoothstep(0.15, 0.9, sl), d = 3.0;
+  float k = 3.6*smoothstep(0.15, 0.9, sl), d = 3.0;
   vec2 gp = xz/38.0;
   float c0 = gully(gp), cx = gully(gp + vec2(d/38.0, 0.0)), cz = gully(gp + vec2(0.0, d/38.0));
   g += vec2(cx - c0, cz - c0)/d*k;
@@ -2818,8 +2878,15 @@ function placeVegetation() {
     if (y < W_MID - 4 && e < 12) continue;
     const tw = towerAt(x, z), nearV = Math.min(Math.hypot(x - 330, z - 30), Math.hypot(x - 300, z - 190));
     const dens = r();
-    if (sl > 1.5) { if (dens < 0.25) add('shrub', x, z, 0.6 + r() * 0.5, tintG()); continue; }
-    if (tw > 8) { if (dens < 0.55) add(r() < 0.72 ? 'shrub' : 'round', x, z, 0.7 + r() * 0.7, tintG(-0.03)); continue; }
+    if (sl > 1.5 || tw > 8) {
+      const grove = smooth(-0.38, 0.5, vnoise(x / 28 + 4.1, z / 31 - 2.3));
+      if (sl > 1.5) {
+        if (dens < 0.10 + 0.29 * grove) add('shrub', x, z, 0.65 + r() * 0.48, tintG(-0.04));
+      } else if (dens < 0.34 + 0.39 * grove) {
+        add(r() < 0.82 - 0.3 * grove ? 'shrub' : 'round', x, z, 0.7 + r() * 0.7, tintG(-0.04));
+      }
+      continue;
+    }
     if (nearV < 60 && dens < 0.08) { add(r() < 0.5 ? 'bamboo' : 'broad', x, z, 0.9 + r() * 0.5, tintG()); continue; }
     if (e < 14 && dens < 0.10) { add(r() < 0.55 ? 'bamboo' : 'broad', x, z, 0.8 + r() * 0.5, tintG()); continue; }
     if (dens < 0.045) add(r() < 0.45 ? 'broad' : r() < 0.5 ? 'round' : 'cypress', x, z, 0.75 + r() * 0.65, tintG());
@@ -2858,14 +2925,13 @@ function bakeCanopy(inst) {
   return forest;
 }
 function grassDensity(forest) {
-  const H = World.H, out = new Uint8Array(GN * GN);
+  const H = World.H, out = new Uint8Array(GN * GN * 2);
   const h = (i, j) => H[clamp(j, 0, GN - 1) * GN + clamp(i, 0, GN - 1)];
   for (let j = 0; j < GN; j++) for (let i = 0; i < GN; i++) {
     const k = j * GN + i, x = -HALF + i * CELL, z = -HALF + j * CELL, y = H[k], m = World.mat[k], rw = World.roadW[k];
-    if (m !== 0 && m !== undefined) { out[k] = 0; continue; }
+    if (m !== 0 && m !== undefined) continue;
     const gx = (h(i + 1, j) - h(i - 1, j)) / (2 * CELL), gz = (h(i, j + 1) - h(i, j - 1)) / (2 * CELL), sl = Math.hypot(gx, gz);
     let d = 1 - smooth(0.55, 1.1, sl);
-    d *= 1 - smooth(0.25, 0.75, rw);
     nearest(river, riverG, x, z, NRv);
     if (NRv.i >= 0 && NRv.d - NRv.w < 8) { const Wl = WL[reachAt(NRv.s, x, z)]; d *= smooth(Wl + 0.25, Wl + 0.9, y); }
     d *= 1 - 0.6 * forest[k];
@@ -2873,7 +2939,12 @@ function grassDensity(forest) {
     if (Math.hypot(x - TING.x, z - TING.z) < 4) d = 0;
     const vil = Math.min(Math.hypot(x - 330, z - 30) / 60, Math.hypot(x - 300, z - 190) / 50); if (vil < 1) d *= 0.55 + 0.45 * vil;
     const tw = towerAt(x, z); if (tw > 20) d *= 1 - smooth(20, 60, tw) * 0.6;
-    out[k] = Math.round(255 * clamp(d, 0, 1));
+    out[k * 2] = Math.round(255 * clamp(d * (1 - smooth(0.25, 0.75, rw)), 0, 1));
+    // R 供草叶使用；G 只给驿道和小路边缘增加野花，路面、田里和陡坡仍留空。
+    if (rw > 0.12) {
+      const verge = smooth(0.12, 0.42, rw) * (1 - smooth(0.82, 0.97, rw));
+      out[k * 2 + 1] = Math.round(255 * clamp(d * verge, 0, 1));
+    }
   }
   return out;
 }
@@ -2931,36 +3002,62 @@ function buildGrass() {
   return out;
 }
 
-// ---------- 野花（每格几朵，跟草一样铺在镜头周围、随风摆）----------
+// ---------- 路边野花（株丛固定在地面，花茎和花冠随风摆动）----------
 function buildFlowers() {
-  const r = rng(913), P = [], B = [], N = [], idx = [], NF = 4;
+  const r = rng(913), P = [], B = [], N = [], idx = [], NF = MOBILE ? 2 : 3;
   for (let f = 0; f < NF; f++) {
-    const a = r() * TAU, d = Math.sqrt(r()) * 0.3, fx = Math.cos(a) * d, fz = Math.sin(a) * d;
-    const h = 0.36 + r() * 0.3, rnd = (f + 0.15 + r() * 0.7) / NF;
-    const lean = r() * TAU, lx = Math.cos(lean) * 0.05, lz = Math.sin(lean) * 0.05;
-    const sd = r() * TAU, wx = Math.cos(sd) * 0.0045, wz = Math.sin(sd) * 0.0045;
-    const b0 = P.length / 3;
-    for (const t of [0, 0.55, 1]) { const cx = fx + lx * t * t, cz = fz + lz * t * t, y = h * t; P.push(cx - wx, y, cz - wz, cx + wx, y, cz + wz); B.push(t, rnd, fx, fz, t, rnd, fx, fz); N.push(0, 2, 0, 0, 2, 0); }
-    for (let k = 0; k < 2; k++) { const a0 = b0 + k * 2; idx.push(a0, a0 + 1, a0 + 3, a0, a0 + 3, a0 + 2); }
-    // 一片叶子
-    { const la = r() * TAU, ll = 0.06 + r() * 0.04, ly = h * (0.15 + r() * 0.25), dx = Math.cos(la), dz = Math.sin(la), k0 = P.length / 3, t = ly / h;
-      P.push(fx - dz * 0.01, ly, fz + dx * 0.01, fx + dz * 0.01, ly, fz - dx * 0.01, fx + dx * ll, ly + 0.03, fz + dz * ll);
-      for (let q = 0; q < 3; q++) { B.push(t, rnd, fx, fz); N.push(0, 2, 0); }
-      idx.push(k0, k0 + 1, k0 + 2); }
-    const hx = fx + lx, hz = fz + lz, hy = h;
-    const tilt = 0.25 + r() * 0.4, ta = r() * TAU;
+    const a = r() * TAU, d = Math.sqrt(r()) * 0.34, fx = Math.cos(a) * d, fz = Math.sin(a) * d;
+    const h = 0.42 + r() * 0.35, rnd = (f + 0.15 + r() * 0.7) / NF;
+    const lean = r() * TAU, lx = Math.cos(lean) * 0.08, lz = Math.sin(lean) * 0.08;
+    const sd = r() * TAU, wx = Math.cos(sd) * 0.006, wz = Math.sin(sd) * 0.006;
+    const green = [0, 2, 0];
+    const vertex = (x, y, z, t, n) => {
+      const i = P.length / 3;
+      P.push(x, y, z); B.push(t, rnd, fx, fz); N.push(...n);
+      return i;
+    };
+    const stem = P.length / 3;
+    for (const t of [0, 0.55, 1]) {
+      const cx = fx + lx * t * t, cz = fz + lz * t * t, width = 1 - t * 0.5;
+      vertex(cx - wx * width, h * t, cz - wz * width, t, green);
+      vertex(cx + wx * width, h * t, cz + wz * width, t, green);
+    }
+    for (let k = 0; k < 2; k++) {
+      const i = stem + k * 2;
+      idx.push(i, i + 1, i + 3, i, i + 3, i + 2);
+    }
+    const leafAngle = r() * TAU;
+    for (const t of [0.32, 0.58]) {
+      const la = leafAngle + t * 11.2, dx = Math.cos(la), dz = Math.sin(la), ll = 0.09 + r() * 0.08;
+      const cx = fx + lx * t * t, cz = fz + lz * t * t, ly = h * t;
+      const base = vertex(cx, ly, cz, t, green);
+      vertex(cx + dx * ll * 0.46 - dz * 0.024, ly + 0.018, cz + dz * ll * 0.46 + dx * 0.024, t, green);
+      vertex(cx + dx * ll, ly + 0.045, cz + dz * ll, t, green);
+      vertex(cx + dx * ll * 0.46 + dz * 0.024, ly + 0.018, cz + dz * ll * 0.46 - dx * 0.024, t, green);
+      idx.push(base, base + 1, base + 2, base, base + 2, base + 3);
+    }
+    const hx = fx + lx, hz = fz + lz;
+    const tilt = 0.25 + r() * 0.55, ta = r() * TAU;
     const nrm = [Math.sin(tilt) * Math.cos(ta), Math.cos(tilt), Math.sin(tilt) * Math.sin(ta)];
     const u = v3.nrm(v3.cross(nrm, [0, 0, 1])), w = v3.cross(nrm, u);
-    const R = 0.034 + r() * 0.024, NP = r() < 0.5 ? 5 : 6, M = NP * 2, c0 = P.length / 3;
-    P.push(hx + nrm[0] * 0.005, hy + nrm[1] * 0.005, hz + nrm[2] * 0.005); B.push(1, rnd, fx, fz); N.push(nrm[0] * 3, nrm[1] * 3, nrm[2] * 3);
-    for (let k = 0; k < M; k++) {
-      const ang = k / M * TAU, rr = k % 2 ? R * 0.4 : R, px = Math.cos(ang) * rr, pz = Math.sin(ang) * rr, lift = k % 2 ? 0 : R * 0.3;
-      P.push(hx + u[0] * px + w[0] * pz + nrm[0] * lift, hy + u[1] * px + w[1] * pz + nrm[1] * lift, hz + u[2] * px + w[2] * pz + nrm[2] * lift);
-      B.push(1, rnd, fx, fz); N.push(nrm[0], nrm[1], nrm[2]);
+    const radius = 0.063 + r() * 0.033, petals = r() < 0.6 ? 5 : 6;
+    const crown = (angle, scale, rise, normal) => {
+      const x = Math.cos(angle) * radius * scale, z = Math.sin(angle) * radius * scale, lift = radius * rise;
+      return vertex(hx + u[0] * x + w[0] * z + nrm[0] * lift, h + u[1] * x + w[1] * z + nrm[1] * lift,
+        hz + u[2] * x + w[2] * z + nrm[2] * lift, 1, normal);
+    };
+    const hub = crown(0, 0, 0, nrm);
+    const contour = [[-0.5, 0.40, 0.01], [-0.3, 0.83, 0.04], [0, 1, 0.19], [0.30, 0.86, 0.10], [0.5, 0.40, 0.01]];
+    for (let p = 0; p < petals; p++) {
+      const edge = P.length / 3;
+      for (const [angle, scale, rise] of contour) crown((p + angle) * TAU / petals, scale, rise, nrm);
+      for (let k = 0; k < contour.length - 1; k++) idx.push(hub, edge + k, edge + k + 1);
     }
-    for (let k = 0; k < M; k++) idx.push(c0, c0 + 1 + k, c0 + 1 + (k + 1) % M);
+    const centerNormal = nrm.map(n => n * 3), middle = crown(0, 0, 0.16, centerNormal);
+    for (let k = 0; k < 6; k++) crown(k * TAU / 6, 0.28, 0.06, centerNormal);
+    for (let k = 0; k < 6; k++) idx.push(middle, middle + 1 + k, middle + 1 + (k + 1) % 6);
   }
-  const cell = 0.8, Rr = (MOBILE ? 14 : 24) * (Q.flowers || 1), m = Math.ceil(Rr / cell) + 1, off = [];
+  const cell = MOBILE ? 1.60 : 1.24, Rr = (MOBILE ? 28 : 24) * Q.flowers, m = Math.ceil(Rr / cell) + 1, off = [];
   for (let j = -m; j <= m; j++) for (let i = -m; i <= m; i++) if (Math.hypot(i, j) * cell <= Rr + cell) off.push(i, j);
   return { vao: makeVAO([{ loc: 0, size: 3, data: new Float32Array(P) }, { loc: 1, size: 4, data: new Float32Array(B) }, { loc: 2, size: 2, data: new Float32Array(off), div: 1 }, { loc: 3, size: 3, data: new Float32Array(N) }], new Uint16Array(idx)), count: idx.length, n: off.length / 2, cell, R: Rr };
 }
@@ -4616,7 +4713,7 @@ function initTextures(forest) {
   TEX.sv = makeTex(S.n, S.n, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, S.data, gl.LINEAR);
   TEX.svm = new Float32Array(World.svm);
   TEX.hgt = makeTex(GN, GN, gl.R32F, gl.RED, gl.FLOAT, World.H, gl.NEAREST);
-  TEX.gd = makeTex(GN, GN, gl.R8, gl.RED, gl.UNSIGNED_BYTE, grassDensity(forest), gl.LINEAR);
+  TEX.gd = makeTex(GN, GN, gl.RG8, gl.RG, gl.UNSIGNED_BYTE, grassDensity(forest), gl.LINEAR);
   const A = makeLeafAtlas();
   TEX.leaf = makeTex(A.w, A.h, gl.RGBA8, gl.RGBA, gl.UNSIGNED_BYTE, A.data, gl.LINEAR_MIPMAP_LINEAR);
   gl.generateMipmap(gl.TEXTURE_2D);
