@@ -1250,8 +1250,8 @@ vec3 fogApply(vec3 col, vec3 wp){
 vec3 hemi(vec3 N){ return mix(uGnd, mix(uSkyHor, uSkyTop, 0.55)*1.05, N.y*0.5 + 0.5); }
 vec3 grassTint(vec2 xz, float ao){   // 色相跟着地形走：洼地青、梁上干黄（地面与草叶共用）
   float dry = clamp((ao - 0.72)*2.6 + (fbm(xz*0.021) - 0.5)*0.9, 0.0, 1.0);
-  vec3 t = mix(vec3(0.9, 1.0, 0.92), vec3(1.16, 1.06, 0.86), dry);
-  return t*(0.9 + 0.2*vn(xz*0.07));
+  vec3 t = mix(vec3(0.88, 1.0, 0.94), vec3(1.03, 0.99, 0.86), dry);
+  return t*(0.92 + 0.14*vn(xz*0.07));
 }
 vec2 flowerPatch(vec2 xz){  // x: 野花成片的程度；y: 哪一种（0 白 1 黄 2 紫 3 粉）
   float m = smoothstep(0.56, 0.74, vn(xz*0.085 + 3.7)*0.75 + vn(xz*0.31)*0.25);
@@ -1338,13 +1338,34 @@ SH.terrain = [VS_HEAD + `
 layout(location=0) in vec3 aP; layout(location=1) in vec3 aN; layout(location=2) in vec3 aX; layout(location=3) in vec4 aM;
 uniform mat4 uVP; out vec3 vP; out vec3 vN; out vec3 vX; out vec4 vM;
 void main(){ vP = aP; vN = aN; vX = aX; vM = aM; gl_Position = uVP*vec4(aP, 1.0); }`,
-FS_HEAD + GLSL_COMMON + MAT_FN + `
+FS_HEAD + GLSL_COMMON + `
 precision highp sampler2DArray;
 uniform float uFar; uniform highp sampler2DArray uDetA; uniform highp sampler2DArray uDetN; uniform sampler2D uFarT; uniform float uFarR;
 in vec3 vP; in vec3 vN; in vec3 vX; in vec4 vM; out vec4 o;
 struct D { vec3 c; vec2 n; float h; float ao; };
 D det(vec2 uv, float L){ vec4 a = texture(uDetA, vec3(uv, L)), b = texture(uDetN, vec3(uv, L)); D d; d.c = a.rgb; d.h = a.a; d.n = b.xy*2.0 - 1.0; d.ao = b.z; return d; }
 vec3 flat3(vec2 n){ return vec3(n.x, 0.0, n.y); }
+// 岩面与林缘的斑块在三维空间中连续，陡壁上也不会被拉成长条。
+float landHash(vec3 p){ p = fract(p*vec3(0.1031, 0.1030, 0.0973)); p += dot(p, p.yxz + 33.33); return fract((p.x + p.y)*p.z); }
+float landNoise(vec3 p){
+  vec3 i = floor(p), f = fract(p), u = f*f*(3.0 - 2.0*f);
+  vec2 a = vec2(mix(landHash(i), landHash(i + vec3(1,0,0)), u.x), mix(landHash(i + vec3(0,1,0)), landHash(i + vec3(1,1,0)), u.x));
+  vec2 b = vec2(mix(landHash(i + vec3(0,0,1)), landHash(i + vec3(1,0,1)), u.x), mix(landHash(i + vec3(0,1,1)), landHash(i + vec3(1,1,1)), u.x));
+  return mix(mix(a.x, a.y, u.y), mix(b.x, b.y, u.y), u.z);
+}
+struct Surface { vec3 color; vec3 normal; float cavity; };
+Surface landSurface(vec3 p, vec3 w, float layer){
+  D x = det(p.zy + vec2(0.3, 0.6), layer), y = det(p.xz, layer), z = det(p.xy + vec2(0.7, 0.2), layer);
+  Surface a;
+  a.color = toLin(x.c*w.x + y.c*w.y + z.c*w.z);
+  a.normal = vec3(0.0, x.n.y, x.n.x)*w.x + vec3(y.n.x, 0.0, y.n.y)*w.y + vec3(z.n.x, z.n.y, 0.0)*w.z;
+  a.cavity = dot(vec3(x.ao, y.ao, z.ao), w);
+  return a;
+}
+vec3 stoneTone(vec3 c, float mottling, float moisture){
+  vec3 tint = mix(vec3(0.57, 0.64, 0.64), vec3(1.02, 1.00, 0.94), mottling);
+  return c*mix(tint, tint*vec3(0.71, 0.80, 0.64), moisture);
+}
 void main(){
   vec3 Ng = normalize(vN);
   vec2 q = vP.xz;
@@ -1357,35 +1378,32 @@ void main(){
     Ng = normalize(mix(Ng, bakedN, 0.82));
     moss = 0.0; forest = vX.z; dirt = 1.0; sv = vec4(ft.r, ft.g, 1.0, 1.0);
   } else { moss = vX.x; forest = vX.y; dirt = vX.z; sv = svAt(q); }
-  float canAO = uFar > 0.5 ? 1.0 : mix(1.0, 0.6, clamp(vX.y*1.15, 0.0, 1.0));
+  float canAO = uFar > 0.5 ? 1.0 : mix(1.0, 0.66, clamp(vX.y, 0.0, 1.0));
   float slope = 1.0 - Ng.y;
-  float shoulder = vn(q*0.024 + vec2(vP.y*0.018, -4.2));
-  float weathering = mix(shoulder, vn(q*0.12 + vP.y*0.041), 0.26);
-  float ledgeCover = smoothstep(0.33, 0.67, 1.0 - weathering)*(1.0 - smoothstep(0.54, 0.89, slope));
-  float rockW = smoothstep(0.21, 0.60, slope + (weathering - 0.5)*0.52)*(1.0 - ledgeCover*0.78);
-  float open = (1.0 - vM.x)*(1.0 - vM.y)*(1.0 - vM.z)*(1.0 - smoothstep(0.3, 0.7, vM.w));
-  float scrub = 0.0;
-  if(uFar < 0.5){
-    float outc = smoothstep(0.71, 0.93, weathering*0.64 + vn(q*0.41)*0.23 + slope*0.46)*open;
-    rockW = max(rockW, outc);
-    float hillside = smoothstep(0.09, 0.33, slope) + smoothstep(42.0, 73.0, vP.y)*0.4;
-    scrub = smoothstep(0.24, 0.86, hillside)*(0.24 + 0.76*ledgeCover)*open*smoothstep(3.0, 29.0, dist);
-  }
-  forest *= 1.0 - rockW*0.75;
+  float belt = landNoise(vP*0.032 + vec3(4.5, 2.1, 9.7));
+  float patches = landNoise(vP*0.115 + vec3(1.0, 5.4, 3.9) + belt*1.44);
+  float mottling = mix(belt, patches, 0.42);
+  float steep = smoothstep(0.48, 0.88, slope);
+  float groundCover = smoothstep(0.27, 0.67, mottling)*(1.0 - steep);
+  float wRock = smoothstep(0.22, 0.74, slope + (0.51 - mottling)*0.36)*(1.0 - 0.66*groundCover);
+  float hill = max(smoothstep(0.075, 0.29, slope), smoothstep(39.0, 71.0, vP.y)*0.7);
+  float open = (1.0 - vM.x)*(1.0 - vM.y)*(1.0 - vM.z)*(1.0 - smoothstep(0.46, 0.9, vM.w));
+  float canopyW = clamp(max(forest*0.94, hill*groundCover*1.56)*open, 0.0, 1.0);
+  float wForest = canopyW*(1.0 - wRock);
+  vec3 projection = abs(Ng)*abs(Ng); projection *= projection; projection /= dot(projection, vec3(1.0));
+  float surfaceDetail = 1.0 - smoothstep(16.0, 104.0, dist);
   // ---- 各材质（细节贴图 × 大尺度色调）----
   vec3 alb = vec3(0.0), dN = vec3(0.0); float cav = 0.0, wsum = 0.0;
   float wRoad = vM.x*(uFar > 0.5 ? 0.8 : 1.0), wPlot = vM.y, wBed = smoothstep(0.55, 1.0, vM.w)*0.9;
-  float wRock = rockW, wForest = forest*(1.0 - wRock);
   float wGrass = max(0.0, 1.0 - wRock - wForest);
   if(uFar > 0.5){
-    D c1 = det(q*0.035, 6.0), c2 = det(q*0.0061 + 0.37, 6.0);
-    vec3 can = toLin(mix(c1.c, c2.c, 0.4))*mix(0.85, 1.25, vn(q*0.004));
+    D c1 = det(q*0.035 + vec2(patches, belt)*0.36, 6.0);
+    vec3 can = toLin(c1.c)*mix(0.93, 1.32, belt);
     float fieldW = (1.0 - smoothstep(0.03, 0.1, slope))*(1.0 - smoothstep(46.0, 58.0, vP.y));
-    D g1 = det(q*0.05, 7.0);
-    can = mix(can, toLin(g1.c)*grassTint(q, 1.0)*vec3(1.1, 1.05, 0.8), fieldW);
-    D r1 = det(q*0.02, 2.0);
-    vec3 rk = rockAlb(vP, Ng)*toLin(r1.c)*vec3(2.1, 2.19, 2.24);
-    alb = mix(can, rk, wRock); dN = flat3(mix(c1.n, r1.n, wRock))*0.6; cav = mix(c1.ao, r1.ao, wRock); wsum = 1.0;
+    D g1 = det(q*0.05, 0.0);
+    can = mix(can, toLin(g1.c)*vec3(0.96, 1.01, 0.88), fieldW);
+    vec3 rk = stoneTone(toLin(vec3(0.52, 0.54, 0.51)), mottling, groundCover*0.19);
+    alb = mix(can, rk, wRock); cav = mix(c1.ao, 0.95, wRock); wsum = 1.0;
   } else {
     if(wGrass > 0.002){
       vec2 fp = flowerPatch(q);
@@ -1393,24 +1411,29 @@ void main(){
       vec3 gc = toLin(mix(g1.c, g2.c, 0.38));
       vec2 gn = g1.n*0.85 + g2.n*0.35; float ga = g1.ao;
       if(fp.x > 0.01){ D g7 = det(q*0.42, 7.0); gc = mix(gc, toLin(g7.c), fp.x*0.85); gn = mix(gn, g7.n, fp.x*0.85); ga = mix(ga, g7.ao, fp.x*0.85); }
-      gc *= grassTint(q, sv.g)*1.15*mix(0.82, 1.14, det(q*0.0117 + 0.5, 0.0).h);
-      gc = mix(gc, toLin(vec3(0.24, 0.38, 0.18)), moss*0.4);
-      if(scrub > 0.01){ D sc = det(q*0.21 + 0.13, 6.0); float k = scrub*smoothstep(0.25, 0.55, sc.h + scrub*0.3);
-        gc = mix(gc, toLin(sc.c)*vec3(1.05, 1.1, 0.95), k); gn = mix(gn, sc.n*1.4, k); ga = mix(ga, sc.ao, k); }
+      gc *= grassTint(q, sv.g)*mix(0.84, 1.09, belt);
+      gc = mix(gc, toLin(vec3(0.20, 0.32, 0.20)), moss*0.34);
+      float grassDetail = 1.0 - smoothstep(0.10, 0.35, slope);
+      vec3 slopeCover = toLin(mix(vec3(0.26, 0.30, 0.21), vec3(0.37, 0.40, 0.31), mottling));
+      gc = mix(slopeCover, gc, grassDetail);
+      gn *= grassDetail; ga = mix(1.0, ga, grassDetail);
       alb += gc*wGrass; dN += flat3(gn)*wGrass; cav += ga*wGrass; wsum += wGrass; }
-    if(wForest > 0.002){ D f1 = det(q*0.5, 4.0), f2 = det(q*0.09 + 0.6, 4.0);
-      vec3 fc = toLin(mix(f1.c, f2.c, 0.3))*1.25;
-      alb += fc*wForest; dN += flat3(f1.n)*wForest; cav += f1.ao*wForest; wsum += wForest; }
+    if(wForest > 0.002){
+      float crowns = max(hill, smoothstep(11.0, 44.0, dist));
+      D floorD = det(q*0.38, 4.0);
+      Surface leaves = landSurface(vP*0.157 + vec3(belt, patches, -belt)*0.31, projection, 6.0);
+      vec3 fc = mix(toLin(floorD.c), leaves.color*mix(0.86, 1.24, belt), crowns);
+      alb += fc*wForest; dN += mix(flat3(floorD.n), leaves.normal*surfaceDetail*0.52, crowns)*wForest;
+      cav += mix(floorD.ao, mix(1.0, leaves.cavity, 0.72), crowns)*wForest; wsum += wForest;
+    }
     if(wRock > 0.002){
-      vec3 bw = pow(abs(Ng), vec3(4.0)); bw /= dot(bw, vec3(1.0));
-      float bedding = vP.y*0.22 + dot(q, vec2(0.026, -0.019)) + 1.8*shoulder + 0.45*weathering;
-      float joint = (weathering - 0.5)*0.85;
-      D rx = det(vec2(vP.z*0.24 + joint, bedding), 8.0), ry = det(q*0.24, 2.0), rz = det(vec2(vP.x*0.24 - joint, bedding), 8.0);
-      vec3 rc = toLin(rx.c*bw.x + ry.c*bw.y + rz.c*bw.z)*(0.41 + 1.45*rockAlb(vP, Ng));
-      float lichen = clamp(moss*0.55 + (1.0 - weathering)*0.21, 0.0, 0.75);
-      rc = mix(rc*vec3(0.96, 1.0, 1.02), rc*vec3(0.65, 0.78, 0.55), lichen);
-      vec3 rn = vec3(0.0, rx.n.y, rx.n.x)*bw.x + vec3(ry.n.x, 0.0, ry.n.y)*bw.y + vec3(rz.n.x, rz.n.y, 0.0)*bw.z;
-      alb += rc*wRock; dN += rn*0.92*wRock; cav += (rx.ao*bw.x + ry.ao*bw.y + rz.ao*bw.z)*wRock; wsum += wRock; }
+      vec3 warp = vec3(patches, belt - patches, -belt)*0.58;
+      Surface stone = landSurface(vP*0.19 + warp, projection, 2.0);
+      float moisture = min(0.65, moss*0.44 + groundCover*0.22);
+      alb += stoneTone(stone.color, mottling, moisture)*wRock;
+      dN += (stone.normal - Ng*dot(stone.normal, Ng))*surfaceDetail*0.68*wRock;
+      cav += mix(1.0, stone.cavity, surfaceDetail*0.75)*wRock; wsum += wRock;
+    }
     alb /= max(wsum, 1e-3); dN /= max(wsum, 1e-3); cav /= max(wsum, 1e-3);
     if(wRoad > 0.002){
       D st = det(q*0.45, 3.0), so = det(q*0.6 + 0.2, 1.0);
@@ -1452,11 +1475,21 @@ void main(){
   o = outC(fogApply(c, vP));
 }`];
 
+const HOUSE_STONE_MAT = 7;
 const PROP_FS = FS_HEAD + GLSL_COMMON + MAT_FN + `
 in vec3 vP; in vec3 vN; in vec3 vC; in float vMat; out vec4 o;
 void main(){
   vec3 N = normalize(vN); if(!gl_FrontFacing) N = -N;
-  vec3 alb = matAlb(vC, vMat, vP, N)*(1.0 - 0.2*uWet);
+  vec3 alb;
+  if(abs(vMat - ${HOUSE_STONE_MAT}.0) < 0.25){
+    vec2 facade = vec2(dot(vP.xz, normalize(vec2(N.z, -N.x) + vec2(1e-4))), vP.y);
+    vec2 uv = mix(facade, vP.xz, smoothstep(0.48, 0.92, abs(N.y)));
+    float wear = fbm(uv*1.2 + vec2(7.1, 2.2)), grit = vn(uv*22.0);
+    float lichen = smoothstep(0.61, 0.79, vn(uv*3.9 + 4.7)*0.53 + wear*0.47);
+    alb = toLin(vC)*(0.72 + 0.48*wear)*(0.9 + 0.17*grit);
+    alb = mix(alb, alb*vec3(0.74, 0.79, 0.61), lichen*0.48);
+  } else alb = matAlb(vC, vMat, vP, N);
+  alb *= 1.0 - 0.2*uWet;
   vec4 sv = svAt(vP.xz);
   float sun = sunVis(vP, N, vec4(min(sv.r*1.2, 1.0), sv.g, sv.b, sv.a));
   float ao = mix(0.55, 1.0, sv.g)*mix(1.0, sv.a, 0.5);
@@ -1621,7 +1654,7 @@ FS_HEAD + GLSL_COMMON + `
 in vec3 vP; in float vT; in float vR; in vec4 vSV; in float vK; out vec4 o;
 vec3 grassCol(vec2 xz){
   float n3 = vn(xz*0.85);
-  vec3 c = mix(vec3(0.28, 0.41, 0.14), vec3(0.40, 0.46, 0.19), vn(xz*2.3));
+  vec3 c = mix(vec3(0.22, 0.33, 0.17), vec3(0.36, 0.42, 0.24), vn(xz*2.3));
   c *= 0.84 + 0.3*n3;
   return toLin(c)*1.1;
 }
@@ -1629,7 +1662,7 @@ void main(){
   float far = smoothstep(7.0, 30.0, length(vP - uCam));
   float t = mix(vT, 0.55, far*0.8), r = mix(vR, 0.5, far*0.7);
   vec3 alb = grassCol(vP.xz)*grassTint(vP.xz, vSV.g)*mix(0.42, 1.12, t)*(0.82 + 0.36*r);
-  alb = mix(alb, alb*vec3(1.18, 1.08, 0.72), smoothstep(0.6, 1.0, t)*smoothstep(0.6, 0.95, r)*0.6);
+  alb = mix(alb, alb*vec3(1.11, 1.04, 0.86), smoothstep(0.6, 1.0, t)*smoothstep(0.6, 0.95, r)*0.46);
   vec3 V = normalize(uCam - vP);
   float sun = sunVis(vP, vec3(0.0, 1.0, 0.0), vSV);
   float ao = vSV.g*mix(1.0, vSV.a, 0.4);
@@ -1935,9 +1968,9 @@ void main(){
     float soil = fbmP(uv*8.0, 8.0, 4);
     c = mix(vec3(0.21, 0.18, 0.12), vec3(0.30, 0.26, 0.17), soil); h = 0.12*soil;
     vec3 a = blobs(uv*15.0 + 0.71, 15.0, 1.15, 0.5), b = blobs(uv*27.0, 27.0, 3.0, 0.52), d = blobs(uv*43.0 + 0.37, 43.0, 3.6, 0.5);
-    if(a.x > 0.05){ c = mix(c, mix(vec3(0.20, 0.33, 0.10), vec3(0.30, 0.40, 0.14), a.y)*(0.75 + 0.35*a.z), a.x); h = mix(h, 0.3 + 0.2*a.z, a.x); }
-    if(b.x > 0.05){ c = mix(c, mix(vec3(0.27, 0.40, 0.13), vec3(0.45, 0.50, 0.20), b.y)*(0.72 + 0.4*b.z), b.x); h = mix(h, 0.52 + 0.2*b.z, b.x); }
-    if(d.x > 0.05){ c = mix(c, mix(vec3(0.33, 0.46, 0.16), vec3(0.55, 0.56, 0.26), d.y)*(0.75 + 0.4*d.z), d.x*0.9); h = mix(h, 0.74 + 0.22*d.z, d.x*0.9); }
+    if(a.x > 0.05){ c = mix(c, mix(vec3(0.19, 0.29, 0.14), vec3(0.27, 0.36, 0.19), a.y)*(0.79 + 0.29*a.z), a.x); h = mix(h, 0.3 + 0.2*a.z, a.x); }
+    if(b.x > 0.05){ c = mix(c, mix(vec3(0.24, 0.34, 0.18), vec3(0.37, 0.43, 0.25), b.y)*(0.78 + 0.33*b.z), b.x); h = mix(h, 0.52 + 0.2*b.z, b.x); }
+    if(d.x > 0.05){ c = mix(c, mix(vec3(0.30, 0.39, 0.22), vec3(0.45, 0.47, 0.31), d.y)*(0.80 + 0.33*d.z), d.x*0.9); h = mix(h, 0.74 + 0.22*d.z, d.x*0.9); }
     if(L == 7){ vec3 f = blobs(uv*19.0 + 0.13, 19.0, 1.0, 0.24); if(f.x > 0.1){ vec3 fc = f.y < 0.35 ? vec3(0.92, 0.9, 0.82) : f.y < 0.6 ? vec3(0.93, 0.78, 0.25) : f.y < 0.8 ? vec3(0.62, 0.5, 0.85) : vec3(0.9, 0.55, 0.62); c = mix(c, fc*(0.8 + 0.25*f.z), f.x); h = mix(h, 0.95, f.x); } }
   } else if(L == 1){            // 土与碎石
     float soil = fbmP(uv*10.0, 10.0, 5), fine = vnP(uv*90.0, 90.0);
@@ -1946,16 +1979,18 @@ void main(){
     if(w.z > 0.6 && p > 0.0){ float dome = sqrt(p*(2.0 - p)); vec3 sc = mix(vec3(0.36, 0.33, 0.28), vec3(0.56, 0.52, 0.45), w.w)*(0.78 + 0.25*dome); c = mix(c, sc, smoothstep(0.0, 0.18, p)); h = max(h, 0.3 + 0.45*dome); }
     vec4 w2 = wor(uv*29.0 + 0.5, 29.0, 1.0); float r2 = 0.2 + 0.15*w2.z, p2 = clamp(1.0 - w2.x/r2, 0.0, 1.0);
     if(w2.z > 0.72 && p2 > 0.0){ float dome = sqrt(p2*(2.0 - p2)); c = mix(c, mix(vec3(0.34, 0.31, 0.27), vec3(0.52, 0.48, 0.41), w2.w)*(0.8 + 0.25*dome), smoothstep(0.0, 0.2, p2)); h = max(h, 0.28 + 0.3*dome); }
-  } else if(L == 2){            // 石灰岩（顶面、远景）：风化斑驳、零星裂缝（不连成网）、溶蚀小坑、地衣
-    float n1 = fbmP(uv*5.0, 5.0, 6), n2 = vnP(uv*60.0, 60.0), n3 = fbmP(uv*13.0 + 1.7, 13.0, 4);
-    vec4 w = wor(uv*6.0, 6.0, 0.9);
-    float crack = (1.0 - smoothstep(0.0, 0.035, w.y - w.x))*smoothstep(0.62, 0.8, w.z*0.55 + n3*0.65);
-    float pit = (1.0 - smoothstep(0.0, 0.1, wor(uv*44.0, 44.0, 1.0).x))*0.5;
-    h = 0.5 + 0.32*n1 + 0.1*n3 - 0.35*crack - 0.18*pit + 0.04*n2;
-    c = mix(vec3(0.52, 0.51, 0.47), vec3(0.70, 0.69, 0.64), n1)*(0.9 + 0.14*n3)*(0.92 + 0.12*n2);
-    c *= 1.0 - 0.45*crack; c *= 1.0 - 0.25*pit;
-    float li = smoothstep(0.6, 0.74, fbmP(uv*7.0 + 2.0, 7.0, 4)); c = mix(c, vec3(0.38, 0.43, 0.30), li*0.55);
-    float st = smoothstep(0.55, 0.85, vnP2(vec2(uv.x*24.0, uv.y*3.0), vec2(24.0, 3.0))); c = mix(c, c*vec3(0.6, 0.58, 0.55), st*0.45);
+  } else if(L == 2){            // 灰岩：不规则的风化面、局部裂隙和溶蚀小坑
+    float coarse = fbmP(uv*5.0, 5.0, 5), fleck = vnP(uv*61.0, 61.0);
+    float patina = fbmP(uv*17.0 + 1.7, 17.0, 4);
+    vec2 warping = vec2(vnP(uv*12.0 + 2.4, 12.0), vnP(uv*12.0 + 7.2, 12.0)) - 0.5;
+    vec4 pieces = wor(uv*7.0 + warping*0.63, 7.0, 1.0);
+    float opened = smoothstep(0.44, 0.72, patina*0.7 + coarse*0.3);
+    float fissure = (1.0 - smoothstep(0.013, 0.072, pieces.y - pieces.x))*opened;
+    float pit = 1.0 - smoothstep(0.02, 0.15, wor(uv*35.0 + 0.42, 35.0, 1.0).x);
+    float grain = 0.58*coarse + 0.31*patina + 0.11*fleck;
+    h = 0.39 + 0.32*grain - 0.16*fissure - 0.07*pit;
+    c = mix(vec3(0.40, 0.43, 0.41), vec3(0.71, 0.70, 0.65), smoothstep(0.19, 0.78, grain));
+    c *= 1.0 - 0.22*fissure - 0.12*pit;
   } else if(L == 3){            // 石板路：不规则石板、缝里有土和苔
     vec4 w = wor(uv*5.0, 5.0, 0.7); float e = w.y - w.x, gap = 1.0 - smoothstep(0.035, 0.085, e), wear = smoothstep(0.06, 0.22, e);
     float n = fbmP(uv*22.0, 22.0, 4), cr = (1.0 - smoothstep(0.0, 0.02, abs(vnP(uv*14.0 + w.z*9.0, 14.0) - 0.5)))*step(0.6, w.w);
@@ -1974,38 +2009,14 @@ void main(){
     if(p > 0.0){ float dome = sqrt(p*(2.0 - p)); c = mix(c, mix(vec3(0.36, 0.36, 0.33), vec3(0.62, 0.60, 0.54), w.w)*(0.75 + 0.3*dome), smoothstep(0.0, 0.12, p)); h = max(h, 0.3 + 0.6*dome); }
     vec4 w2 = wor(uv*17.0 + 0.4, 17.0, 1.0); float r2 = 0.25 + 0.15*w2.z, p2 = clamp(1.0 - w2.x/r2, 0.0, 1.0);
     if(p2 > 0.0 && w2.z > 0.3){ float dome = sqrt(p2*(2.0 - p2)); c = mix(c, mix(vec3(0.4, 0.38, 0.34), vec3(0.6, 0.57, 0.5), w2.w)*(0.78 + 0.3*dome), smoothstep(0.0, 0.15, p2)); h = max(h, 0.25 + 0.4*dome); }
-  } else if(L == 8){            // 喀斯特崖壁（贴图 v 朝上）：层理、错开的节理、竖向溶沟、从层面往下的黑色水痕、地衣
-    float u = uv.x;
-    float wob = (vnP(vec2(u*5.0, 0.5), 5.0) - 0.5)*0.035 + (vnP(vec2(u*17.0, 3.5), 17.0) - 0.5)*0.012;
-    float vv = fract(uv.y + wob);
-    float bed = vv < 0.21 ? 0.0 : vv < 0.46 ? 1.0 : vv < 0.7 ? 2.0 : 3.0;
-    float lo = bed < 0.5 ? 0.0 : bed < 1.5 ? 0.21 : bed < 2.5 ? 0.46 : 0.7, hi = bed < 0.5 ? 0.21 : bed < 1.5 ? 0.46 : bed < 2.5 ? 0.7 : 1.0;
-    float dLo = vv - lo, dHi = hi - vv, dE = min(dLo, dHi), id = hP(vec2(bed, 7.0));
-    float line = (1.0 - smoothstep(0.0, 0.011 + 0.008*hP(vec2(bed, 6.1)), dE))*smoothstep(0.22, 0.55, vnP(vec2(u*9.0, bed + 0.5), 9.0))*(0.35 + 0.65*hP(vec2(bed, 5.5))), rnd = smoothstep(0.0, 0.06, dE);
-    float uj = u + (vnP(vec2(uv.y*9.0, bed*2.0 + 0.5), 9.0) - 0.5)*0.03;
-    float j1 = hP(vec2(bed, 1.3)), j2 = hP(vec2(bed, 2.9));
-    float jd = min(abs(fract(uj - j1 + 0.5) - 0.5), j2 > 0.45 ? abs(fract(uj - j2 + 0.5) - 0.5) : 1.0);
-    float joint = (1.0 - smoothstep(0.0, 0.009, jd))*smoothstep(0.0, 0.02, dE);
-    float flute = 0.5 + 0.5*sin(6.2831*(u*16.0 + (vnP(vec2(u*16.0, uv.y*2.0 + bed), 16.0) - 0.5)*0.8));
-    float fl = 0.3 + 0.7*hP(vec2(bed, 4.4));
-    float pit = smoothstep(0.64, 0.82, vnP(uv*48.0, 48.0))*0.7;
-    float n1 = fbmP(uv*6.0, 6.0, 5), n2 = vnP(uv*64.0, 64.0);
-    h = 0.55 + 0.1*(id - 0.5) + 0.12*rnd - 0.2*line - 0.4*joint - 0.07*flute*fl - 0.14*pit + 0.16*n1 + 0.04*n2;
-    c = mix(vec3(0.55, 0.54, 0.5), vec3(0.71, 0.7, 0.65), n1)*(0.9 + 0.16*id)*(0.92 + 0.1*n2);
-    c *= mix(vec3(1.0), vec3(1.05, 1.0, 0.9), smoothstep(0.6, 0.9, hP(vec2(bed, 8.8))));
-    float sk = vnP(vec2(u*22.0, 0.5), 22.0)*0.7 + vnP(vec2(u*7.0, 2.5), 7.0)*0.3;
-    float streak = smoothstep(0.58, 0.8, sk)*(0.45 + 0.55*(1.0 - dHi/(hi - lo)));
-    c = mix(c, c*vec3(0.36, 0.36, 0.35), streak*0.7);
-    c *= 1.0 - 0.4*line; c *= 1.0 - 0.55*joint; c *= 1.0 - 0.22*pit; c *= 1.0 - 0.06*flute*fl;
-    c *= 0.84 + 0.32*fbmP(uv*3.0 + 5.0, 3.0, 4);
-    float lich = smoothstep(0.55, 0.75, fbmP(uv*9.0 + 3.0, 9.0, 4))*(0.45 + 0.55*(1.0 - smoothstep(0.0, 0.08, dHi)));
-    c = mix(c, vec3(0.36, 0.42, 0.26), lich*0.6);
-    c = mix(c, vec3(0.7, 0.66, 0.45), smoothstep(0.74, 0.86, vnP(uv*30.0 + 7.0, 30.0))*0.22);
-  } else if(L == 6){            // 远看的林冠：一团团树冠，冠间阴影
-    vec4 w = wor(uv*9.0, 9.0, 0.9); float r = 0.48 + 0.18*w.z, p = clamp(1.0 - w.x/r, 0.0, 1.0), dome = sqrt(p*(2.0 - p));
-    float leaf = vnP(uv*70.0, 70.0);
-    c = mix(vec3(0.07, 0.10, 0.05), mix(vec3(0.17, 0.26, 0.10), vec3(0.30, 0.36, 0.14), w.w)*(0.65 + 0.45*dome)*(0.85 + 0.3*leaf), smoothstep(0.0, 0.25, p));
-    h = 0.15 + 0.8*dome + 0.05*leaf;
+  } else if(L == 6){            // 远看的林冠：高低不一的树冠团簇及其林隙
+    vec3 tall = blobs(uv*9.0 + 0.46, 9.0, 1.15, 0.61);
+    vec3 young = blobs(uv*16.0 + 0.71, 16.0, 1.33, 0.54);
+    float canopy = max(tall.x*tall.z, young.x*young.z*0.75);
+    float leaf = vnP(uv*67.0, 67.0), mixLeaf = 0.57*max(tall.y*tall.x, young.y*young.x) + 0.43*vnP(uv*6.0, 6.0);
+    vec3 crown = mix(vec3(0.18, 0.28, 0.23), vec3(0.36, 0.43, 0.29), mixLeaf);
+    c = mix(vec3(0.12, 0.18, 0.14), crown*(0.89 + 0.18*leaf), smoothstep(0.03, 0.79, canopy));
+    h = 0.29 + 0.49*canopy + 0.055*leaf;
   }
   o = vec4(clamp(c, 0.0, 1.0), clamp(h, 0.0, 1.0));
 }`];
@@ -2101,9 +2112,9 @@ function texArray(N, L, aniso) {
   if (CAPS.aniso && aniso) gl.texParameterf(gl.TEXTURE_2D_ARRAY, CAPS.aniso.TEXTURE_MAX_ANISOTROPY_EXT, Math.min(aniso, gl.getParameter(CAPS.aniso.MAX_TEXTURE_MAX_ANISOTROPY_EXT)));
   return t;
 }
-const DET_STR = [3.0, 5.0, 8.0, 5.0, 4.0, 7.0, 6.0, 3.0, 7.0];
+const DET_STR = [2.2, 5.0, 4.7, 5.0, 4.0, 7.0, 3.2, 2.2];
 function initDetailTextures() {
-  const N = Q.detail || (MOBILE ? 256 : 512), L = 9;
+  const N = Q.detail || (MOBILE ? 256 : 512), L = DET_STR.length;
   TEX.detA = texArray(N, L, 8); TEX.detN = texArray(N, L, 8);
   const fb = gl.createFramebuffer(); gl.bindFramebuffer(gl.FRAMEBUFFER, fb);
   gl.disable(gl.DEPTH_TEST); gl.disable(gl.BLEND); gl.disable(gl.CULL_FACE); gl.viewport(0, 0, N, N);
@@ -2592,41 +2603,148 @@ function buildParticles(n, gen) {
 
 // ---------- 静态道具：房屋、桥、亭、寨门、石台、三门、藤梯 ----------
 const ROPES = [];
+const HOUSE_STONES = [0x777b74, 0x85877e, 0x919187, 0x888b81, 0x99978a].map(hex);
+const HOUSE_SLATES = [0x484c4c, 0x505757, 0x5c6160, 0x535957].map(hex);
+function houseMasonry(mb, at, left, right, bottom, top, r) {
+  if (right - left < 0.07 || top - bottom < 0.07) return;
+  mb.M = HOUSE_STONE_MAT;
+  const face = (x0, x1, y0, y1, depth, color) => mb.quad(at(x0, y0, depth), at(x1, y0, depth), at(x1, y1, depth), at(x0, y1, depth), color);
+  face(left, right, bottom, top, -0.019, hex(0x69665c));
+  for (let y = bottom; y < top - 0.03;) {
+    let nextY = Math.min(top, y + (MOBILE ? 0.21 : 0.16) + r() * 0.18);
+    if (top - nextY < 0.11) nextY = top;
+    for (let x = left; x < right - 0.02;) {
+      let nextX = Math.min(right, x + 0.3 + r() * 0.67);
+      if (right - nextX < 0.19) nextX = right;
+      const edge = Math.min(0.018, (nextX - x) * 0.10);
+      const skew = (r() - 0.5) * Math.min(0.13, (nextX - x) * 0.23);
+      const bottomEdge = y + 0.008, topEdge = nextY - 0.008;
+      const a = topEdge - r() * 0.044, b = topEdge - r() * 0.055;
+      const col = mul3(HOUSE_STONES[Math.floor(r() * HOUSE_STONES.length)], 0.89 + r() * 0.17);
+      mb.quad(at(x + edge, bottomEdge + r() * 0.022, 0.009 + r() * 0.028), at(nextX - edge, bottomEdge, 0.011),
+        at(nextX - edge - Math.max(skew, 0), b, 0.012 + r() * 0.016), at(x + edge + Math.max(-skew, 0), a, 0.018), col);
+      x = nextX;
+    }
+    y = nextY;
+  }
+}
+function houseRoof(mb, W, D, base, roof, r) {
+  const slate = roof === 'slate', tile = roof === 'tile';
+  const halfW = W / 2 + (slate ? 0.38 : 0.55), eave = D / 2 + (slate ? 0.69 : 0.79);
+  const rise = D * (slate ? 0.36 : tile ? 0.40 : 0.45);
+  const col = slate ? HOUSE_SLATES[1] : tile ? hex(0x4b5052) : mix3(COL.thatchD, COL.thatch, 0.24 + 0.42 * r());
+  // 屋面在墙顶留出厚度，檐口再向外降低。
+  const height = (d) => base + rise * (1 - d / (D / 2)) + 0.18 * smooth(0, D / 2, d) - 0.08 * Math.sin(Math.PI * d / eave);
+  for (const side of [-1, 1]) {
+    const point = (x, d, lift = 0) => [x, height(d) + lift, side * d];
+    const quad = (a, b, c, d, color) => { if (side > 0) mb.quad(a, b, c, d, color); else mb.quad(b, a, d, c, color); };
+    const band = (a, b, color) => quad(point(-halfW, b), point(halfW, b), point(halfW, a), point(-halfW, a), color);
+    mb.M = slate || tile ? HOUSE_STONE_MAT : 1;
+    band(0, eave * 0.5, col);
+    band(eave * 0.5, eave, mul3(col, 0.91));
+    const thick = slate ? 0.12 : tile ? 0.14 : 0.24;
+    quad(point(-halfW, eave, -thick), point(halfW, eave, -thick), point(halfW, eave), point(-halfW, eave), mul3(col, 0.64));
+
+    if (slate) {
+      const rows = Math.ceil(eave / (MOBILE ? 0.59 : 0.48));
+      for (let k = 0; k < rows; k++) {
+        const a = k * eave / rows, b = (k + 1) * eave / rows;
+        for (let x = -halfW; x < halfW - 0.015;) {
+          let next = Math.min(halfW, x + 0.39 + r() * 0.59);
+          if (halfW - next < 0.22) next = halfW;
+          const c = mul3(HOUSE_SLATES[Math.floor(r() * HOUSE_SLATES.length)], 0.91 + r() * 0.18);
+          const end = Math.min(eave, b + (r() - 0.22) * 0.092), seam = next - 0.014;
+          const left = point(x + 0.009, end, 0.077), right = point(seam, end - r()*0.03, 0.068 + r() * 0.024);
+          quad(left, right, point(seam, a, 0.037), point(x + 0.009, a, 0.037), c);
+          quad([left[0], left[1] - 0.039, left[2]], [right[0], right[1] - 0.039, right[2]], right, left, mul3(c, 0.57));
+          x = next;
+        }
+      }
+    } else if (tile) {
+      const lanes = Math.round(2 * halfW / 0.34), rows = Math.ceil(eave / (MOBILE ? 0.64 : 0.52)), width = 2 * halfW / lanes;
+      for (let k = 0; k < lanes; k++) {
+        const x = -halfW + (k + 0.5) * width + (r() - 0.5)*0.018;
+        const section = [[-0.33, 0.024], [-0.18, 0.063], [0.04, 0.074], [0.22, 0.055], [0.34, 0.022]];
+        for (let row = 0; row < rows; row++) {
+          const a = eave * row / rows, b = eave * (row + 1) / rows, c = mul3(col, 0.86 + 0.26*r());
+          for (let j = 1; j < section.length; j++) {
+            const [left, h0] = section[j - 1], [right, h1] = section[j];
+            const p = x + left*width, q = x + right*width;
+            quad(point(p, b, h0 + 0.018), point(q, b, h1 + 0.018), point(q, a, h1), point(p, a, h0), c);
+          }
+        }
+      }
+    }
+
+    mb.M = 2;
+    const y = height(eave) - thick - 0.02;
+    mb.box(0, y, side * (eave - 0.13), W + 0.48, 0.13, 0.17, COL.woodD);
+    for (let x = -W / 2 + 0.27; x < W / 2; x += 0.66) mb.box(x, y + 0.012, side * (eave - 0.12), 0.085, 0.105, 0.32, COL.wood);
+    const atGable = (z, y, relief = 0) => [side * (W / 2 + relief), y, -side*z];
+    const foot = base - 0.14, crown = height(0) - 0.07;
+    if (slate) mb.M = HOUSE_STONE_MAT;
+    mb.tri(atGable(-D / 2, foot), atGable(D / 2, foot), atGable(0, crown), slate ? HOUSE_STONES[0] : COL.wood);
+    if (slate) for (let y = foot; y < crown - 0.08; y += 0.24) {
+      const top = Math.min(y + 0.24, crown), width = D / 2 * (crown - top) / (crown - foot);
+      houseMasonry(mb, (z, yy, relief) => atGable(z, yy, relief + 0.025), -width, width, y, top, r);
+    }
+  }
+  mb.M = slate || tile ? HOUSE_STONE_MAT : 1;
+  mb.box(0, height(0) + 0.053, 0, 2 * halfW + 0.05, 0.125, 0.29, mul3(col, 0.69));
+}
 function buildHouse(mb, h) {
   const r = rng(Math.floor(h.x * 13 + h.z * 7));
   mb.setT(h.x, h.y, h.z, h.ry);
   const W = h.w, D = h.d, WH = h.wallH, B = 0.5;
-  mb.M = 3; mb.box(0, B / 2 - 0.15, 0, W + 0.6, B + 0.3, D + 0.6, mix3(COL.stone, COL.stoneW, r()));
-  mb.box(0, 0.12, D / 2 + 0.62, 1.7, 0.26, 0.55, mul3(COL.stone, 0.95));
-  const dark = hex(0x15110d);
-  let wallC;
-  if (h.kind === 'zhai') {
-    wallC = mix3(COL.stoneW, COL.stone, r() * 0.7);
-    mb.M = 3; mb.box(0, B + WH / 2, 0, W, WH, D, wallC);
-    mb.M = 2; mb.box(0, B + 1.05, D / 2 + 0.02, 1.15, 2.1, 0.07, mul3(COL.woodD, 1.1));
-    mb.box(0, B + 2.18, D / 2 + 0.06, 1.7, 0.18, 0.16, COL.wood);
-    mb.M = 0; for (const sx of [-0.3, 0.3]) mb.box(W * sx, B + 1.55, D / 2 + 0.02, 0.62, 0.48, 0.05, dark);
-    mb.M = 2; for (const sx of [-0.3, 0.3]) mb.box(W * sx, B + 1.29, D / 2 + 0.06, 0.8, 0.07, 0.1, COL.wood);
-    if (r() < 0.5) { mb.M = 2; mb.box(W / 2 + 0.75, B + 0.45, 0.4, 1.0, 0.9, 1.5, mul3(COL.wood, 0.85)); mb.M = 1; mb.box(W / 2 + 0.75, B + 0.98, 0.4, 1.3, 0.18, 1.8, COL.thatchD); }
-  } else {
-    wallC = mix3(COL.wood, COL.woodL, r());
-    mb.M = 2; mb.box(0, B + WH / 2, 0, W - 0.12, WH, D - 0.12, wallC);
-    const post = mul3(COL.woodD, 1.15);
-    for (const sz of [-1, 1]) for (let k = 0; k <= 4; k++) mb.box(-W / 2 + W * k / 4, B + WH / 2, sz * (D / 2 - 0.02), 0.2, WH, 0.2, post);
-    for (const sx of [-1, 1]) mb.box(sx * (W / 2 - 0.02), B + WH / 2, 0, 0.2, WH, 0.2, post);
-    for (const sz of [-1, 1]) { mb.box(0, B + WH - 0.1, sz * (D / 2 + 0.01), W + 0.1, 0.2, 0.22, post); mb.box(0, B + 0.95, sz * (D / 2 + 0.01), W, 0.12, 0.16, post); }
-    mb.M = 0; mb.box(0, B + 1.0, D / 2 + 0.03, 1.15, 2.0, 0.06, dark);
-    if (r() < 0.75) { mb.box(-W * 0.3, B + 1.25, D / 2 + 0.03, W * 0.28, 1.5, 0.06, mul3(dark, 1.4)); mb.M = 2; mb.box(-W * 0.3, B + 0.55, D / 2 + 0.35, W * 0.3, 0.12, 0.7, COL.woodL); mb.box(-W * 0.3, B + 0.27, D / 2 + 0.35, W * 0.28, 0.54, 0.6, mul3(COL.wood, 0.9)); }
-    else { mb.M = 0; mb.box(-W * 0.3, B + 1.6, D / 2 + 0.03, 0.9, 0.6, 0.05, dark); }
-    mb.M = 0; mb.box(W * 0.3, B + 1.6, D / 2 + 0.03, 0.9, 0.6, 0.05, dark);
-    mb.M = 2; for (let q = 0; q < 4; q++) mb.box(W * 0.3 - 0.36 + q * 0.24, B + 1.6, D / 2 + 0.07, 0.05, 0.62, 0.04, COL.woodL);
+  const post = h.kind === 'pu', board = post && r() < 0.63;
+  const roof = h.roof === 'tile' ? 'tile' : post && r() < 0.27 ? 'thatch' : 'slate';
+  const eave = B + WH, front = (x, y, z) => [x, y, D / 2 + z];
+  const wood = mul3(COL.wood, 0.79 + 0.24 * r()), opening = hex(0x211e16);
+  mb.M = HOUSE_STONE_MAT;
+  const w0 = W / 2 + 0.14, d0 = D / 2 + 0.15;
+  mb.box(0, B / 2 - 0.16, 0, 2*w0, B + 0.31, 2*d0, HOUSE_STONES[0]);
+  for (const s of [-1, 1]) {
+    houseMasonry(mb, (x, y, z) => [s*x, y, s*(d0 + z)], -w0, w0, -0.15, B - 0.035, r);
+    houseMasonry(mb, (z, y, x) => [s*(w0 + x), y, -s*z], -d0, d0, -0.15, B - 0.035, r);
   }
-  const tile = h.roof === 'tile', slab = h.kind === 'zhai' && r() < 0.4;
-  const roofC = tile ? COL.tile : slab ? mix3(COL.stone, hex(0x7d7a72), 0.6) : mix3(COL.thatch, COL.thatchD, r());
-  mb.gable(0, B + WH, 0, W, D, D * (tile || slab ? 0.36 : 0.47), tile ? 0.62 : 0.85, roofC, wallC, 0, tile ? 0.14 : slab ? 0.16 : 0.36, tile || slab ? 5 : 1, h.kind === 'zhai' ? 3 : 2);
-  if (tile) { mb.M = 5; for (const sx of [-1, 1]) mb.box(sx * (W / 2 + 0.5), B + WH + D * 0.36 + 0.28, 0, 0.5, 0.32, 0.36, mul3(COL.tile, 0.8)); }
-  if (r() < 0.6) { mb.M = 2; const sx = r() < 0.5 ? -1 : 1; for (let q = 0; q < 5; q++) mb.cyl([sx * (W / 2 + 0.5), 0.18 + q * 0.2, -D / 2 + 0.4], [sx * (W / 2 + 0.5), 0.18 + q * 0.2, D / 2 - 0.6], 0.1, 0.1, 6, mul3(COL.woodL, 0.9 + 0.2 * r())); }
-  if (r() < 0.5) { mb.M = 3; mb.lathe(W / 2 - 0.2, 0, D / 2 + 0.8, [[0.0, 0.72], [0.22, 0.7], [0.3, 0.5], [0.27, 0.12], [0.18, 0.0]], 10, hex(0x5a4a3c)); }
+  mb.box(0.04, 0.11, D / 2 + 0.44, 1.52, 0.28, 0.57, HOUSE_STONES[1]);
+  mb.box(-0.06, 0.255, D / 2 + 0.29, 1.38, 0.12, 0.47, HOUSE_STONES[2]);
+
+  // 石墙以大小不一的本地毛石错缝砌成，驿路木构房只在正面露出柱、板。
+  houseMasonry(mb, (x, y, z) => [-x, y, -D / 2 - z], -W / 2, W / 2, B - 0.03, eave, r);
+  for (const s of [-1, 1]) houseMasonry(mb, (x, y, z) => [s * (W / 2 + z), y, -s * x], -D / 2, D / 2, B - 0.03, eave, r);
+  const panel = (a, b, y0, y1) => {
+    if (board) {
+      if (b - a < 0.02 || y1 - y0 < 0.02) return;
+      mb.M = 2;
+      mb.box((a + b) / 2, (y0 + y1) / 2, D / 2 - 0.065, b - a, y1 - y0, 0.13, wood);
+    } else houseMasonry(mb, front, a, b, y0, y1, r);
+  };
+  for (const bay of [-1, 0, 1]) {
+    const x = bay * W / 3, a = x - W / 6, b = x + W / 6;
+    const half = bay === 0 ? 0.62 : board ? 0.68 + 0.23 * r() : 0.30 + 0.15 * r();
+    const lo = B + (bay === 0 ? 0.06 : board ? 0.98 : 1.22), hi = B + (bay === 0 ? 2.06 : 1.80);
+    panel(a, x - half, B, eave); panel(x + half, b, B, eave);
+    panel(x - half, x + half, B, lo); panel(x - half, x + half, hi, eave);
+    mb.M = 0; mb.box(x, (lo + hi) / 2, D / 2 - 0.19, 2 * half + 0.08, hi - lo + 0.04, 0.055, opening);
+    mb.M = 2;
+    for (const s of [-1, 1]) mb.box(x + s * half, (lo + hi) / 2, D / 2 - 0.006, 0.105, hi - lo + 0.12, 0.23, COL.woodD);
+    for (const y of [lo, hi]) mb.box(x, y, D / 2 + 0.01, 2 * half + 0.18, 0.098, 0.22, wood);
+    if (bay === 0) {
+      for (const s of [-1, 1]) mb.box(x + s * half * 0.48, (lo + hi) / 2, D / 2 - 0.085, half - 0.027, hi - lo - 0.08, 0.038, mul3(wood, 0.76 + 0.10 * r()));
+      mb.box(x, lo + 0.96, D / 2 - 0.051, 0.29, 0.052, 0.049, COL.woodD);
+    } else {
+      const n = board ? 5 : 3;
+      for (let j = 1; j <= n; j++) mb.box(x + half * (2 * j / (n + 1) - 1), (lo + hi) / 2, D / 2 - 0.058, 0.036, hi - lo, 0.065, wood);
+      mb.box(x, (lo + hi) / 2, D / 2 - 0.052, 2 * half, 0.037, 0.065, wood);
+    }
+  }
+  mb.M = 2;
+  for (const x of [-W / 2 + 0.06, W / 2 - 0.06, ...(board ? [-W / 6, W / 6] : [])]) {
+    mb.box(x, (B + eave) / 2, D / 2 - 0.019, 0.16, WH, 0.17, COL.woodD);
+  }
+  mb.box(0, eave - 0.27, D / 2 - 0.038, W + 0.13, 0.15, 0.17, COL.woodD);
+  houseRoof(mb, W, D, eave, roof, r);
   mb.clearT(); mb.M = 0;
 }
 function buildStatic() {
@@ -2763,8 +2881,8 @@ function makeLeafAtlas() {
     const N = 110;
     for (let k = 0; k < N; k++) {
       const t = k / N, a = r() * TAU, d = Math.pow(r(), 0.6) * 100, x = ox + cx + Math.cos(a) * d, y = cy + Math.sin(a) * d;
-      const L = 28 + r() * 16, Wd = 10 + r() * 5, ang = a - Math.PI / 2 + (r() - 0.5) * 1.5, l = 24 + t * 26 + r() * 6;
-      leaf(x, y, L, Wd, ang, hsl(80 + r() * 24, 32 + r() * 18, l), hsl(70, 30, l + 16, 0.35));
+      const L = 28 + r() * 16, Wd = 10 + r() * 5, ang = a - Math.PI / 2 + (r() - 0.5) * 1.5, l = 22 + t * 24 + r() * 6;
+      leaf(x, y, L, Wd, ang, hsl(91 + r() * 34, 29 + r() * 18, l), hsl(86, 27, l + 13, 0.28));
     } }
   { const ox = 256;   // 柏木下垂的鳞叶枝
     for (let k = 0; k < 11; k++) {
@@ -2795,7 +2913,7 @@ function makeLeafAtlas() {
     const N = 190;
     for (let k = 0; k < N; k++) {
       const t = k / N, a = r() * TAU, d = Math.pow(r(), 0.55) * 106, x = ox + cx + Math.cos(a) * d, y = cy + Math.sin(a) * d * 0.92;
-      leaf(x, y, 15 + r() * 9, 7 + r() * 4, a - Math.PI / 2 + (r() - 0.5) * 1.8, hsl(76 + r() * 34, 28 + r() * 20, 20 + t * 24 + r() * 7), null);
+      leaf(x, y, 15 + r() * 9, 7 + r() * 4, a - Math.PI / 2 + (r() - 0.5) * 1.8, hsl(91 + r() * 31, 25 + r() * 17, 20 + t * 22 + r() * 7), null);
     } }
   const img = c.getImageData(0, 0, W, Hh), d = img.data;
   const filled = new Uint8Array(W * Hh); for (let i = 0; i < W * Hh; i++) filled[i] = d[i * 4 + 3] > 100 ? 1 : 0;
@@ -2823,8 +2941,8 @@ function makeLeafAtlas() {
 
 // ---------- 树木原型（枝干几何 + 叶片卡）----------
 const BARK = hex(0x5a4838);
-const VEG_KINDS = ['broad', 'round', 'cypress', 'bamboo', 'shrub', 'rock', 'reed'];
-const VEG_CROWN = { broad: [5.2, 2.6], round: [3.4, 1.9], cypress: [5.5, 1.5], bamboo: [5.5, 2.0], shrub: [0.7, 0.9], rock: [0.4, 0.8], reed: [0.8, 0.5] };
+const VEG_KINDS = ['broad', 'round', 'cypress', 'bamboo', 'shrub', 'thicket', 'rock', 'reed'];
+const VEG_CROWN = { broad: [5.2, 2.6], round: [3.4, 1.9], cypress: [5.5, 1.5], bamboo: [5.5, 2.0], shrub: [0.7, 0.9], thicket: [1.0, 1.6], rock: [0.4, 0.8], reed: [0.8, 0.5] };
 function protoTree(kind) {
   const mb = new MB(), r = rng(kind.length * 131 + 7);
   const radial = (C, sy = 1.15, up = 0.35) => (p) => v3.nrm([p[0] - C[0], (p[1] - C[1]) * sy + up, p[2] - C[2]]);
@@ -2887,6 +3005,12 @@ function protoTree(kind) {
       const rr = 0.55 + 0.45 * r(), p = [d[0] * rr * 0.9, 0.35 + d[1] * rr * 0.75, d[2] * rr * 0.9];
       cardAt(p, 0.5 + r() * 0.25, 3, nf, shade().map(v => v * (0.6 + 0.4 * rr)), 0.6, v3.add(v3.nrm(v3.sub(p, C)), v3.sc(randDir(), 0.8)));
     }
+  } else if (kind === 'thicket') {
+    // 岩坡的低矮阔叶灌丛，用交叠的小树冠散开边缘。
+    const nf = radial([0, 0.15, 0], 1.25, 0.52);
+    for (const [x, y, z, size] of [[-0.68,0.55,0.11,0.81], [0.40,0.80,-0.08,0.95], [0.24,0.34,0.70,0.75], [-0.22,0.44,-0.55,0.68]]) {
+      for (let k = 0; k < 3; k++) cardAt([x + (r() - 0.5)*0.35, y + (r() - 0.5)*0.29, z + (r() - 0.5)*0.34], size, 3, nf, shade(), 0.51);
+    }
   } else if (kind === 'rock') {
     mb.K = 2; mb.ellip(0, 0.18, 0, 1.0, 0.62, 0.85, [1, 1, 1], 0, 9, 6, 0, 0.62, 0.32, 7);
   } else if (kind === 'reed') {
@@ -2931,12 +3055,17 @@ function placeVegetation() {
     if (y < W_MID - 4 && e < 12) continue;
     const tw = towerAt(x, z), nearV = Math.min(Math.hypot(x - 330, z - 30), Math.hypot(x - 300, z - 190));
     const dens = r();
-    if (sl > 1.5 || tw > 8) {
-      const grove = smooth(-0.38, 0.5, vnoise(x / 28 + 4.1, z / 31 - 2.3));
-      if (sl > 1.5) {
-        if (dens < 0.10 + 0.29 * grove) add('shrub', x, z, 0.65 + r() * 0.48, tintG(-0.04));
-      } else if (dens < 0.34 + 0.39 * grove) {
-        add(r() < 0.82 - 0.3 * grove ? 'shrub' : 'round', x, z, 0.7 + r() * 0.7, tintG(-0.04));
+    if (sl > 1.05 || tw > 7) {
+      const belt = vnoise(x / 42 + 4.1, z / 38 - 2.3);
+      const pocket = vnoise(x / 13 + belt*0.54, z / 16 + 3.1);
+      const grove = smooth(-0.44, 0.45, belt*0.7 + pocket*0.3);
+      const ledge = 1 - smooth(0.85, 2.05, sl);
+      const growing = 1 - smooth(2.4, 5.5, sl);
+      if (dens < growing*(0.06 + grove*(0.53 + 0.24*ledge))) {
+        const tall = r() < (0.12 + 0.5*grove)*ledge;
+        const kind = tall ? (r() < 0.15 ? 'broad' : 'round') : 'thicket';
+        const scale = tall ? 0.58 + r()*0.73 : 0.64 + r()*0.83;
+        add(kind, x, z, scale, tintG(-0.055));
       }
       continue;
     }
@@ -2965,14 +3094,15 @@ function bakeCanopy(inst) {
     const put = (a, b, w) => { if (a >= 0 && b >= 0 && a < nn && b < nn) arr[b * nn + a] += amt * w; };
     put(i, j, (1 - u) * (1 - v)); put(i + 1, j, u * (1 - v)); put(i, j + 1, (1 - u) * v); put(i + 1, j + 1, u * v);
   };
-  for (const kind of ['broad', 'round', 'cypress', 'bamboo', 'shrub']) for (const t of inst[kind]) {
+  for (const kind of ['broad', 'round', 'cypress', 'bamboo', 'shrub', 'thicket']) for (const t of inst[kind]) {
     const [hc, rc0] = VEG_CROWN[kind], rc = rc0 * t.sc, h = hc * t.sc, area = Math.PI * rc * rc;
     const sx = t.x - SUN_H[0] * h / SUN_TAN, sz = t.z - SUN_H[1] * h / SUN_TAN;
-    splat(cov, n, S.step, sx, sz, area / (S.step * S.step) * (kind === 'shrub' ? 0.35 : 0.8));
-    splat(occ, n, S.step, t.x, t.z, area / (S.step * S.step) * (kind === 'shrub' ? 0.2 : 0.6));
-    if (kind === 'shrub') continue;
-    const R = rc + 2, i0 = Math.max(0, Math.floor((t.x - R + HALF) / CELL)), i1 = Math.min(GN - 1, Math.ceil((t.x + R + HALF) / CELL)), j0 = Math.max(0, Math.floor((t.z - R + HALF) / CELL)), j1 = Math.min(GN - 1, Math.ceil((t.z + R + HALF) / CELL));
-    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) { const d = Math.hypot(-HALF + i * CELL - t.x, -HALF + j * CELL - t.z); if (d < R) forest[j * GN + i] = Math.min(1, forest[j * GN + i] + 0.75 * (1 - smooth(rc * 0.5, R, d))); }
+    const low = kind === 'shrub' || kind === 'thicket';
+    splat(cov, n, S.step, sx, sz, area / (S.step * S.step) * (low ? 0.35 : 0.8));
+    splat(occ, n, S.step, t.x, t.z, area / (S.step * S.step) * (low ? 0.2 : 0.6));
+    const R = rc + (low ? 1.0 : 2.0), strength = low ? 0.29 : 0.75;
+    const i0 = Math.max(0, Math.floor((t.x - R + HALF) / CELL)), i1 = Math.min(GN - 1, Math.ceil((t.x + R + HALF) / CELL)), j0 = Math.max(0, Math.floor((t.z - R + HALF) / CELL)), j1 = Math.min(GN - 1, Math.ceil((t.z + R + HALF) / CELL));
+    for (let j = j0; j <= j1; j++) for (let i = i0; i <= i1; i++) { const d = Math.hypot(-HALF + i * CELL - t.x, -HALF + j * CELL - t.z); if (d < R) forest[j * GN + i] = Math.min(1, forest[j * GN + i] + strength * (1 - smooth(rc * 0.5, R, d))); }
   }
   for (let k = 0; k < n * n; k++) { S.data[k * 4 + 2] = Math.round(255 * (1 - 0.7 * Math.min(1, cov[k]))); S.data[k * 4 + 3] = Math.round(255 * (1 - 0.45 * Math.min(1, occ[k]))); }
   return forest;
@@ -3009,7 +3139,7 @@ function buildVegetation(inst) {
     for (const t of list) {
       t.tile = clamp(Math.floor((t.z + HALF) / TILE), 0, TN - 1) * TN + clamp(Math.floor((t.x + HALF) / TILE), 0, TN - 1);
       const sv = svSample(t.x, t.z);
-      t.sun = kind === 'rock' || kind === 'reed' ? sv[0] : sunVisAt(t.x, t.z, t.y + hc * t.sc * 0.9);
+      t.sun = kind === 'rock' || kind === 'reed' || kind === 'thicket' ? sv[0] : sunVisAt(t.x, t.z, t.y + hc * t.sc * 0.9);
       t.ao = kind === 'rock' || kind === 'reed' ? sv[1] * sv[3] : lerp(sv[1], 1, 0.45) * lerp(sv[3], 1, 0.5);
     }
     list.sort((a, b) => a.tile - b.tile);
@@ -3026,7 +3156,7 @@ function buildVegetation(inst) {
     const ib = gl.createBuffer(); gl.bindBuffer(gl.ARRAY_BUFFER, ib); gl.bufferData(gl.ARRAY_BUFFER, data, gl.STATIC_DRAW);
     for (const [loc, off] of [[5, 0], [6, 16], [7, 32]]) { gl.enableVertexAttribArray(loc); gl.vertexAttribPointer(loc, 4, gl.FLOAT, false, 48, off); gl.vertexAttribDivisor(loc, 1); }
     gl.bindVertexArray(null);
-    out.push({ kind, vao, ib, count: mb.p.length / 3, n, tiles, leafy: kind !== 'rock' && kind !== 'reed', far: kind === 'shrub' || kind === 'rock' || kind === 'reed' ? 260 : 1e9 });
+    out.push({ kind, vao, ib, count: mb.p.length / 3, n, tiles, leafy: kind !== 'rock' && kind !== 'reed', far: kind === 'thicket' ? 380 : kind === 'shrub' || kind === 'rock' || kind === 'reed' ? 260 : 1e9 });
   }
   return out;
 }
