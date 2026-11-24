@@ -706,7 +706,7 @@ const NRv = {}, NRr = {}, NRp = {}, NRt = {};
 const BRIDGE = (() => {
   nearest(road, roadG, 96, 34, NRr);
   const sMid = NRr.s, half = 23;
-  return { sMid, s0: sMid - half, s1: sMid + half, deckW: 4.4, deckH: W_MID + 13, half };
+  return { sMid, s0: sMid - half, s1: sMid + half, deckW: 4.4, deckH: W_MID + 13, half, pierOffset: 7, pierHalf: 1.2 };
 })();
 function roadPointAt(s, cv = road) {
   const P = cv.pts; let lo = 0, hi = P.length - 1;
@@ -1809,16 +1809,59 @@ uniform mat4 uVP; out vec3 vP; out vec4 vU; out vec2 vF;
 void main(){ vP = aP; vU = aU; vF = aF; gl_Position = uVP*vec4(aP, 1.0); }`,
 FS_HEAD + GLSL_COMMON + `
 uniform sampler2D uScene; uniform highp sampler2D uDepth; uniform vec2 uRes; uniform vec2 uNF;
+uniform float uBridgeS; uniform vec4 uPiers;
 in vec3 vP; in vec4 vU; in vec2 vF; out vec4 o;
 float linZ(float d){ float z = d*2.0 - 1.0; return 2.0*uNF.x*uNF.y/(uNF.y + uNF.x - z*(uNF.y - uNF.x)); }
+// Noise height and slope share the four corner samples.
+vec3 ripple(vec2 p){
+  vec2 i = floor(p), f = fract(p), u = f*f*(3.0 - 2.0*f);
+  float a = h21(i), b = h21(i + vec2(1.0, 0.0)), c = h21(i + vec2(0.0, 1.0)), d = h21(i + vec2(1.0, 1.0));
+  vec2 g = 6.0*f*(1.0 - f)*vec2(mix(b-a,d-c,u.y), mix(c-a,d-b,u.x));
+  return vec3(g, mix(mix(a,b,u.x), mix(c,d,u.x), u.y));
+}
+float pierFoam(vec2 r, float crest){
+  float bow = 1.0 - smoothstep(0.07, 0.53, abs(length(vec2((r.x + 2.2)*0.8, r.y*0.76)) - 1.35));
+  bow *= 1.0 - smoothstep(-2.7, -1.0, r.x);
+  float down = r.x - 2.5;
+  float tail = smoothstep(-0.6, 1.8, down)*(1.0 - smoothstep(4.5, 17.0, down));
+  float side = abs(r.y + (crest - 0.5)*0.9);
+  tail *= 1.0 - smoothstep(0.12, 0.93, abs(side - (1.05 + max(down, 0.0)*0.13)));
+  return bow*(0.10 + crest*0.31) + tail*smoothstep(0.23, 0.77, crest)*0.56;
+}
 void main(){
   float s = vU.x, foam = vU.z, rap = vU.w, t = uTime;
   vec2 fd = normalize(vF + vec2(1e-4)), fp = vec2(-fd.y, fd.x);
-  vec2 q = vec2(dot(vP.xz, fd), dot(vP.xz, fp));
-  float spd = 1.0 + rap*1.8, e = 0.15;
-  vec2 q1 = vec2(q.x*0.32 - t*spd, q.y*0.55), q2 = vec2(q.x*1.05 - t*spd*1.6, q.y*1.6 + 3.0), q3 = vec2(q.x*3.1 - t*spd*2.3, q.y*4.0 + 7.0);
-  float h1 = vn(q1), h2 = vn(q2), h3 = vn(q3);
-  vec2 g = vec2(h1 - vn(q1 + vec2(e, 0.0)), h1 - vn(q1 + vec2(0.0, e)))*0.8 + vec2(h2 - vn(q2 + vec2(e, 0.0)), h2 - vn(q2 + vec2(0.0, e)))*(0.5 + 0.5*rap) + vec2(h3 - vn(q3 + vec2(e, 0.0)), h3 - vn(q3 + vec2(0.0, e)))*0.25;
+  float along = s - uBridgeS, bridge = 1.0 - smoothstep(44.0, 92.0, abs(along));
+  vec2 g = vec2(0.0);
+  float bands = 0.0, fn = 0.0, currentFoam = 0.0, bankFoam = 0.0;
+  if(bridge < 1.0){
+    vec2 q = vec2(dot(vP.xz, fd), dot(vP.xz, fp));
+    float spd = 1.0 + rap*1.8, e = 0.15;
+    vec2 q1 = vec2(q.x*0.32 - t*spd, q.y*0.55), q2 = vec2(q.x*1.05 - t*spd*1.6, q.y*1.6 + 3.0), q3 = vec2(q.x*3.1 - t*spd*2.3, q.y*4.0 + 7.0);
+    float h1 = vn(q1), h2 = vn(q2), h3 = vn(q3);
+    g = vec2(h1 - vn(q1 + vec2(e, 0.0)), h1 - vn(q1 + vec2(0.0, e)))*0.8 + vec2(h2 - vn(q2 + vec2(e, 0.0)), h2 - vn(q2 + vec2(0.0, e)))*(0.5 + 0.5*rap) + vec2(h3 - vn(q3 + vec2(e, 0.0)), h3 - vn(q3 + vec2(0.0, e)))*0.25;
+    bands = smoothstep(0.6, 0.98, sin(s*0.45 + h1*2.4)*0.5 + 0.5)*rap;
+    fn = vn(vec2(q.x*0.8 - t*2.4*spd, q.y*3.0))*0.6 + vn(vec2(q.x*2.4 - t*3.2*spd, q.y*7.5))*0.4;
+  }
+  if(bridge > 0.0){
+    // Use travel time along the channel so bank shear stays bounded as the clock advances.
+    float core = 1.0 - smoothstep(0.44, 1.04, abs(vU.y));
+    vec2 adv = vec2(along/mix(0.92, 2.75, core) - t, vU.y*16.0);
+    float drift = vn(adv*vec2(0.39, 0.34)) - 0.5;
+    vec3 swell = ripple(adv*vec2(0.68, 0.75) + vec2(0.0, drift*0.8));
+    vec3 riffle = ripple(adv*vec2(1.75, 1.88) + vec2(13.2, drift*1.45 + 8.1));
+    vec3 fine = ripple(adv*vec2(3.6, 3.9) + vec2(t*0.24, 11.4));
+    vec2 slopes = -(swell.xy*vec2(0.055, 0.093) + riffle.xy*vec2(0.05, 0.067) + fine.xy*vec2(0.02, 0.03));
+    g = mix(g, slopes, bridge);
+    float crest = swell.z*0.42 + riffle.z*0.43 + fine.z*0.15;
+    float thread = vn(adv*vec2(0.82, 3.3) + vec2(4.8, drift*2.1));
+    currentFoam = smoothstep(0.64, 0.82, crest*0.64 + thread*0.36)*mix(0.24, 0.63, core);
+    if(abs(along) < 28.0){
+      vec2 a = vP.xz - uPiers.xy, b = vP.xz - uPiers.zw;
+      currentFoam += pierFoam(vec2(dot(a, fd), dot(a, fp)), crest) + pierFoam(vec2(dot(b, fd), dot(b, fp)), crest);
+    }
+    bankFoam = smoothstep(0.43, 0.82, crest)*0.22;
+  }
   vec2 gw = fd*g.x + fp*g.y;
   float dist = length(uCam - vP);
   vec3 N = normalize(vec3(gw.x, 1.0, gw.y)*vec3(1.0, 1.0 + smoothstep(50.0, 400.0, dist)*3.0, 1.0));
@@ -1830,7 +1873,7 @@ void main(){
   float sz2 = linZ(texture(uDepth, ruv).r); if(sz2 < wz){ ruv = suv; sz2 = linZ(texture(uDepth, suv).r); }
   float thick = max(sz2 - wz, 0.0)*max(0.25, V.y);
   vec3 refr = texture(uScene, ruv).rgb; if(uEncode > 0.5) refr = refr*refr*4.0;
-  vec3 absorb = exp(-thick*vec3(0.42, 0.16, 0.2));
+  vec3 absorb = exp(-thick*mix(vec3(0.42, 0.16, 0.2), vec3(0.61, 0.29, 0.28), bridge));
   vec4 sv = svAt(vP.xz);
   float sun = sunVis(vP, vec3(0.0, 1.0, 0.0), sv);
   vec3 scat = toLin(vec3(0.10, 0.31, 0.28))*(hemi(vec3(0.0, 1.0, 0.0))*sv.g + uSunCol*0.14*sun);
@@ -1839,10 +1882,9 @@ void main(){
   float fr = 0.02 + 0.98*pow(1.0 - max(dot(N, V), 0.0), 5.0);
   vec3 c = mix(water, skyBase(R)*mix(0.55, 1.0, sv.g), fr);
   c += uSunCol*sun*pow(max(dot(R, uSunDir), 0.0), 220.0)*5.0*(1.0 - uWet);
-  float bands = smoothstep(0.6, 0.98, sin(s*0.45 + h1*2.4)*0.5 + 0.5)*rap;
-  float fn = vn(vec2(q.x*0.8 - t*2.4*spd, q.y*3.0))*0.6 + vn(vec2(q.x*2.4 - t*3.2*spd, q.y*7.5))*0.4;
   float shore = 1.0 - smoothstep(0.0, 0.5, thick);
   float fm = clamp((foam + bands*0.9 + shore*0.6)*smoothstep(0.32, 0.78, fn + foam*0.35), 0.0, 1.0);
+  fm = mix(fm, clamp(currentFoam + shore*bankFoam, 0.0, 1.0), bridge);
   vec3 fcol = toLin(vec3(0.93, 0.96, 0.94))*(uSunCol*0.75*sun + hemi(vec3(0.0, 1.0, 0.0))*1.05);
   c = mix(c, fcol, fm);
   o = outC(fogApply(c, vP));
@@ -2603,7 +2645,8 @@ function buildWater() {
   reach(0, iD, W_UP, null, LIP_D);
   reach(iD, iL + 3, W_MID, LIP_D, LIP_L);
   reach(iL, P.length - 1, W_LOW, LIP_L, null);
-  return { vao: makeVAO([{ loc: 0, size: 3, data: new Float32Array(pos) }, { loc: 1, size: 4, data: new Float32Array(uv) }, { loc: 2, size: 2, data: new Float32Array(flow) }], new Uint32Array(idx)), count: idx.length };
+  const pierCenters = [-BRIDGE.pierOffset, BRIDGE.pierOffset].flatMap(offset => roadPointAt(BRIDGE.sMid + offset).slice(0, 2));
+  return { vao: makeVAO([{ loc: 0, size: 3, data: new Float32Array(pos) }, { loc: 1, size: 4, data: new Float32Array(uv) }, { loc: 2, size: 2, data: new Float32Array(flow) }], new Uint32Array(idx)), count: idx.length, pierCenters };
 }
 
 // ---------- 瀑布 ----------
@@ -2883,7 +2926,8 @@ function buildBridge(mb) {
     mb.quad(at(sa, -hw, y0), at(sa, hw, y0), at(sa, hw, spring), at(sa, -hw, spring), mul3(COL.stone, 0.85));
     mb.quad(at(sb, -hw, y0), at(sb, hw, y0), at(sb, hw, spring), at(sb, -hw, spring), mul3(COL.stone, 0.85));
     const sm = (sa + sb) / 2; for (const sg of [-1, 1]) { const p = at(sm, sg * (hw + 1.2), W_MID + 1.2); mb.tri(at(sa, sg * hw, y0), at(sb, sg * hw, y0), p, COL.stone); mb.tri(at(sa, sg * hw, spring + 0.2), at(sa, sg * hw, y0), p, COL.stone); mb.tri(at(sb, sg * hw, y0), at(sb, sg * hw, spring + 0.2), p, COL.stone); mb.tri(at(sa, sg * hw, spring + 0.2), p, at(sb, sg * hw, spring + 0.2), COL.stoneL); } };
-  pier(S.sMid - 8.2, S.sMid - 5.8); pier(S.sMid + 5.8, S.sMid + 8.2); pier(S.s0, S.sMid - 21); pier(S.sMid + 21, S.s1);
+  for (const offset of [-S.pierOffset, S.pierOffset]) pier(S.sMid + offset - S.pierHalf, S.sMid + offset + S.pierHalf);
+  pier(S.s0, S.sMid - 21); pier(S.sMid + 21, S.s1);
   mb.M = 0;
 }
 // ---------- 叶片贴图（画布生成：阔叶、柏枝、竹叶、灌木小叶）----------
@@ -5186,6 +5230,7 @@ function render() {
   {
     const pg = PG.water, u = pg.u; gl.useProgram(pg.p); setCommon(pg);
     bindTex(5, RT.texScene, u.uScene); bindTex(6, RT.texDepth, u.uDepth); gl.uniform2f(u.uRes, RT.w, RT.h); gl.uniform2f(u.uNF, CAM.near, CAM.far);
+    gl.uniform1f(u.uBridgeS, riverSBridge); gl.uniform4fv(u.uPiers, R.water.pierCenters);
     gl.bindVertexArray(R.water.vao); gl.drawElements(gl.TRIANGLES, R.water.count, gl.UNSIGNED_INT, 0);
   }
   gl.enable(gl.BLEND); gl.blendFunc(gl.SRC_ALPHA, gl.ONE_MINUS_SRC_ALPHA); gl.depthMask(false);
