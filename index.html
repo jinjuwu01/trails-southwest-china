@@ -1441,7 +1441,32 @@ void main(){
       float dw = smoothstep(0.3, 0.7, dirt);
       vec3 rc = mix(stoneC, soilC, dw); vec2 rn = mix(st.n, so.n, dw); float rh = mix(st.h, so.h, dw), ra = mix(st.ao, so.ao, dw);
       float w = clamp(wRoad*1.5 - 0.25 + (rh - 0.5)*0.5, 0.0, 1.0);
-      alb = mix(alb, rc, w); dN = mix(dN, flat3(rn)*1.2, w); cav = mix(cav, ra, w); }
+      float post = 1.0 - smoothstep(33.0, 56.0, length(q - vec2(330.0, 30.0)));
+      if(post > 0.0){
+        // 白水铺的实土与碎石分散成斑块，两端渐融入原来的驿道材质。
+        vec2 drift = vec2(vn(q*0.16 + 3.1), vn(q*0.12 + 8.3));
+        D earth = det(mat2(0.91, 0.415, -0.415, 0.91)*q*0.61 + drift*0.69, 1.0);
+        D gravel = det(q*0.77 + drift*0.71 + 0.39, 5.0);
+        float deposits = smoothstep(0.41, 0.72, drift.x*0.68 + vn(q*0.86 + 1.2)*0.32);
+        float gravelW = 0.055 + deposits*mix(0.47, 0.27, wRoad);
+        float dry = vn(q*0.23 + 2.8);
+        float blend = clamp(post + 4.0*post*(1.0 - post)*(0.13 + 0.64*(dry - 0.5)), 0.0, 1.0);
+        vec3 earthC = toLin(earth.c)*mix(vec3(0.79, 0.8, 0.82), vec3(1.13, 1.09, 1.02), dry);
+        vec3 gravelC = toLin(gravel.c)*vec3(0.88, 0.86, 0.78);
+        vec3 roadColor = mix(earthC, gravelC, gravelW);
+        vec2 roadN = mix(earth.n, gravel.n, gravelW)*0.68;
+        float roadAO = mix(1.0, mix(earth.ao, gravel.ao, gravelW), 0.66);
+        float bank = vn(q*0.37 + vec2(9.2, 4.2))*0.68 + vn(q*1.22 + 3.6)*0.32;
+        float fringe = 4.0*wRoad*(1.0 - wRoad);
+        float worn = wRoad + fringe*((bank - 0.51)*0.81 + (earth.h - 0.39)*0.13);
+        float edge = smoothstep(0.14, 0.78, worn);
+        alb = mix(mix(alb, rc, w), mix(alb, roadColor, edge), blend);
+        dN = mix(mix(dN, flat3(rn)*1.2, w), mix(dN, flat3(roadN), edge), blend);
+        cav = mix(mix(cav, ra, w), mix(cav, roadAO, edge), blend);
+      } else {
+        alb = mix(alb, rc, w); dN = mix(dN, flat3(rn)*1.2, w); cav = mix(cav, ra, w);
+      }
+    }
     if(wPlot > 0.002){ D so = det(q*0.6, 1.0); alb = mix(alb, toLin(so.c)*0.95, wPlot); dN = mix(dN, flat3(so.n), wPlot); cav = mix(cav, so.ao, wPlot); }
     if(wBed > 0.002){ D bd = det(q*0.36, 5.0); alb = mix(alb, toLin(bd.c), wBed); dN = mix(dN, flat3(bd.n)*1.2, wBed); cav = mix(cav, bd.ao, wBed); }
   }
