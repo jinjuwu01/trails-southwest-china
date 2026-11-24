@@ -1531,10 +1531,46 @@ void main(){
   o = vec4(enc(fogApply(c, vP)), a);
 }`];
 
-SH.grass = [VS_HEAD + GLSL_COMMON + `
-layout(location=0) in vec3 aP; layout(location=1) in vec4 aB; layout(location=2) in vec2 iO;
+const BRUSH_WALKERS = 3, BRUSH_SAMPLES = 4;
+const PLANT_BRUSH = `
+uniform vec4 uBrushBounds;
+uniform vec2 uBrushWalkers[${BRUSH_WALKERS}];
+uniform vec4 uBrushFeet[${BRUSH_WALKERS * BRUSH_SAMPLES}];
+uniform vec2 uBrushDirections[${BRUSH_WALKERS * BRUSH_SAMPLES}];
+vec2 plantBrush(vec2 root, float y){
+  if(any(lessThan(root, uBrushBounds.xy)) || any(greaterThan(root, uBrushBounds.zw))) return vec2(0.0);
+  vec2 bend = vec2(0.0);
+  float total = 0.0, strongest = 0.0;
+  for(int i=0;i<${BRUSH_WALKERS};i++){
+    vec2 reach = root - uBrushWalkers[i];
+    if(dot(reach, reach) > 9.0) continue;
+    for(int j=0;j<${BRUSH_SAMPLES};j++){
+      int sampleIndex = i*${BRUSH_SAMPLES} + j;
+      vec4 foot = uBrushFeet[sampleIndex];
+      if(foot.w <= 0.0) continue;
+      vec2 offset = root - foot.xy;
+      float dist2 = dot(offset, offset);
+      if(dist2 >= 0.1681) continue;
+      float pressure = foot.w*(1.0 - smoothstep(0.0081, 0.1681, dist2))*(1.0 - smoothstep(0.08, 0.49, abs(y - foot.z)));
+      vec2 push = uBrushDirections[sampleIndex]*0.72 + offset*2.2;
+      bend += pressure*push/max(0.9, length(push));
+      total += pressure;
+      strongest = max(strongest, pressure);
+    }
+  }
+  return bend*(strongest/max(total, 1e-4));
+}
+vec3 turnPlant(vec3 p, vec2 dir, vec2 arc){
+  float along = dot(p.xz, dir);
+  p.xz += dir*((arc.x - 1.0)*along + arc.y*p.y);
+  p.y = arc.x*p.y - arc.y*along;
+  return p;
+}
+`;
+SH.grass = [VS_HEAD + GLSL_COMMON + PLANT_BRUSH + `
+layout(location=0) in vec3 aP; layout(location=1) in vec4 aB; layout(location=2) in vec2 iO; layout(location=3) in vec2 aRoot;
 uniform mat4 uVP; uniform vec2 uCamCell; uniform float uGCell; uniform float uGR; uniform float uGR0; uniform float uGScale; uniform vec3 uFwd;
-uniform highp sampler2D uHgt; uniform float uCellW; uniform float uGN; uniform sampler2D uGD; uniform vec3 uPlayer; uniform float uPx; uniform float uKmax;
+uniform highp sampler2D uHgt; uniform float uCellW; uniform float uGN; uniform sampler2D uGD; uniform float uPx; uniform float uKmax;
 out vec3 vP; out float vT; out float vR; out vec4 vSV; out float vK;
 float hgtAt(vec2 xz){
   vec2 f = clamp((xz + 512.0)/uCellW, vec2(0.0), vec2(uGN - 1.001));
@@ -1553,24 +1589,31 @@ void main(){
   float hs = den*fade*(0.6 + 0.8*h21(cell + 3.1))*uGScale;
   if(hs < 0.04){ gl_Position = vec4(2.0, 2.0, 2.0, 1.0); return; }
   float ang = h21(cell + 9.7)*6.2831, cs = cos(ang), sn = sin(ang);
-  vec3 lp = aP; float cw = uGCell/0.55;
-  lp.xz *= (0.8 + 0.5*h21(cell + 5.5))*cw;
-  lp.xz = vec2(cs*lp.x - sn*lp.z, sn*lp.x + cs*lp.z);
+  float scale = (0.8 + 0.5*h21(cell + 5.5))*uGCell/0.55;
+  mat2 rotation = mat2(cs, sn, -sn, cs);
+  vec2 root = base + rotation*aRoot*scale;
+  vec2 leaf = rotation*(aP.xz - aRoot)*scale;
   // 远处的草叶比一个像素还细，会一闪一闪：画宽一些、同时按比例变透明（多重采样覆盖），平均覆盖不变
   float k = clamp(1.3*dist/(uPx*0.042), 1.0, uKmax);
   vec2 wdir = vec2(cos(aB.w), sin(aB.w)); wdir = vec2(cs*wdir.x - sn*wdir.y, sn*wdir.x + cs*wdir.y);
-  lp.xz += wdir*(aB.z*2.0 - 1.0)*0.021*(1.0 - pow(aB.x, 1.4))*cw*(0.8 + 0.5*h21(cell + 5.5))*(k - 1.0);
+  leaf += wdir*(aB.z*2.0 - 1.0)*0.021*(1.0 - pow(aB.x, 1.4))*scale*(k - 1.0);
   vK = k;
-  float t = aB.x, w = t*t, bh = lp.y*hs;
-  vec2 gp = base + lp.xz;
-  vec3 wp = vec3(gp.x, hgtAt(gp) + bh, gp.y);
-  float gust = vn(gp*0.045 + uTime*vec2(0.33, 0.21));
-  float ph = uTime*2.1 + dot(gp, vec2(0.37, 0.23)) + aB.y*6.0;
+  float t = aB.x, w = t*t, bh = aP.y*hs, ground = hgtAt(root);
+  float gust = vn(root*0.045 + uTime*vec2(0.33, 0.21));
+  float ph = uTime*2.1 + dot(root, vec2(0.37, 0.23)) + aB.y*6.0;
   vec2 wind = vec2(0.8, 0.45)*(0.25 + 0.9*gust)*(0.6 + 0.4*sin(ph));
-  wp.xz += wind*w*bh*0.75;
-  vec2 dp = wp.xz - uPlayer.xz; float dl = length(dp);
-  if(dl < 1.4 && abs(wp.y - uPlayer.y) < 2.0) wp.xz += dp/max(dl, 1e-3)*(1.4 - dl)*w*0.8;
-  wp.y -= w*bh*0.18*(gust + 0.3);
+  vec3 blade = vec3(leaf.x, bh, leaf.y);
+  blade.xz += wind*w*bh*0.75;
+  blade.y -= w*bh*0.18*(gust + 0.3);
+  if(t > 0.0 && uGR0 <= 0.0){
+    vec2 brush = plantBrush(root, ground);
+    float amount = length(brush);
+    if(amount > 1e-4){
+      float tilt = 0.72*amount*t;
+      blade = turnPlant(blade, brush/amount, vec2(cos(tilt), sin(tilt)));
+    }
+  }
+  vec3 wp = vec3(root.x, ground, root.y) + blade;
   vP = wp; vT = t; vR = aB.y; vSV = svAt(base);
   gl_Position = uVP*vec4(wp, 1.0);
 }`,
@@ -1596,10 +1639,10 @@ void main(){
 }`];
 
 
-SH.flower = [VS_HEAD + GLSL_COMMON + `
+SH.flower = [VS_HEAD + GLSL_COMMON + PLANT_BRUSH + `
 layout(location=0) in vec3 aP; layout(location=1) in vec4 aB; layout(location=2) in vec2 iO; layout(location=3) in vec3 aN;
 uniform mat4 uVP; uniform vec2 uCamCell; uniform float uGCell; uniform float uGR; uniform vec3 uFwd;
-uniform highp sampler2D uHgt; uniform float uCellW; uniform float uGN; uniform sampler2D uGD; uniform vec3 uPlayer;
+uniform highp sampler2D uHgt; uniform float uCellW; uniform float uGN; uniform sampler2D uGD;
 out vec3 vP; out vec3 vN; out vec3 vC; out vec4 vSV; out float vPart;
 float hgtAt(vec2 xz){
   vec2 f = clamp((xz + 512.0)/uCellW, vec2(0.0), vec2(uGN - 1.001));
@@ -1625,25 +1668,35 @@ void main(){
   float ang = h21(cell + 9.7)*6.2831, cs = cos(ang), sn = sin(ang);
   float hs = (0.75 + 0.5*h21(cell + 5.5))*(sp == 1 ? 1.15 : sp == 2 ? 0.8 : 1.0);
   vec3 lp = aP; lp.y *= hs;
-  lp.xz = vec2(cs*lp.x - sn*lp.z, sn*lp.x + cs*lp.z);
+  mat2 rotation = mat2(cs, sn, -sn, cs);
+  lp.xz = rotation*(lp.xz - aB.zw);
   vec3 n = aN; n.xz = vec2(cs*n.x - sn*n.z, sn*n.x + cs*n.z);
-  vec2 gp = base + lp.xz, root = base + vec2(cs*aB.z - sn*aB.w, sn*aB.z + cs*aB.w);
-  float t = aB.x, w = t*t, bh = lp.y;
-  vec3 wp = vec3(gp.x, hgtAt(root) + bh, gp.y);
+  vec2 root = base + rotation*aB.zw;
+  float t = aB.x, w = t*t, bh = lp.y, ground = hgtAt(root);
   float gust = vn(root*0.045 + uTime*vec2(0.33, 0.21));
   float phase = uTime*2.1 + dot(root, vec2(0.37, 0.23)) + aB.y*6.0;
   vec2 wind = vec2(0.86, 0.5)*(0.15 + 0.35*gust + 0.28*sin(phase));
   wind += vec2(-0.5, 0.86)*0.14*sin(phase*0.63 + 1.4);
-  wp.xz += wind*w*bh;
-  vec2 dp = wp.xz - uPlayer.xz; float dl = length(dp);
-  if(dl < 1.4 && abs(wp.y - uPlayer.y) < 2.0) wp.xz += dp/max(dl, 1e-3)*(1.4 - dl)*w*0.8;
-  wp.y -= w*bh*0.15*dot(wind, wind);
+  lp.xz += wind*w*bh;
+  lp.y -= w*bh*0.15*dot(wind, wind);
   float L = length(aN), part = L < 1.5 ? 1.0 : (L < 2.5 ? 0.0 : 2.0);
+  n -= vec3(wind.x, 0.0, wind.y)*L*0.35;
+  if(t > 0.0){
+    vec2 brush = plantBrush(root, ground);
+    float amount = length(brush);
+    if(amount > 1e-4){
+      float tilt = 0.53*amount*t;
+      vec2 dir = brush/amount, arc = vec2(cos(tilt), sin(tilt));
+      lp = turnPlant(lp, dir, arc);
+      n = turnPlant(n, dir, arc);
+    }
+  }
+  vec3 wp = vec3(root.x, ground, root.y) + lp;
   vPart = part;
   vec3 pc = PET[sp]*(0.88 + 0.24*h21(cell + aB.y*17.0));
   vec3 green = mix(vec3(0.23, 0.36, 0.12), vec3(0.36, 0.49, 0.20), type);
   vC = part < 0.5 ? green : mix(part > 1.5 ? CEN[sp] : pc, green, smoothstep(uGR*0.65, uGR, dist)*0.62);
-  vN = part < 0.5 ? vec3(0.0, 1.0, 0.0) : normalize(n - vec3(wind.x, 0.0, wind.y)*L*0.35);
+  vN = part < 0.5 ? vec3(0.0, 1.0, 0.0) : normalize(n);
   vP = wp; vSV = svAt(base);
   gl_Position = uVP*vec4(wp, 1.0);
 }`,
@@ -2980,7 +3033,7 @@ function buildVegetation(inst) {
 
 // ---------- 草（每簇若干草叶，按世界格子稳定地铺在镜头周围）----------
 function buildGrass() {
-  const r = rng(321), P = [], B = [], idx = [];
+  const r = rng(321), P = [], B = [], roots = [], idx = [];
   const NB = 9;
   for (let b = 0; b < NB; b++) {
     const a = r() * TAU, d = Math.sqrt(r()) * 0.34, bx = Math.cos(a) * d, bz = Math.sin(a) * d;
@@ -2992,11 +3045,12 @@ function buildGrass() {
       if (ri < 3) { P.push(cx - wd[0] * w, y, cz - wd[1] * w, cx + wd[0] * w, y, cz + wd[1] * w); B.push(t, rnd, 0, f, t, rnd, 1, f); }
       else { P.push(cx, y, cz); B.push(1, rnd, 0.5, f); }
     });
+    for (let j = base; j < P.length / 3; j++) roots.push(bx, bz);
     for (let ri = 0; ri < 2; ri++) { const a0 = base + ri * 2; idx.push(a0, a0 + 1, a0 + 3, a0, a0 + 3, a0 + 2); }
     idx.push(base + 4, base + 5, base + 6);
   }
   const ring = (cell, R0, R) => { const o = [], m = Math.ceil(R / cell) + 1; for (let j = -m; j <= m; j++) for (let i = -m; i <= m; i++) { const d = Math.hypot(i, j) * cell; if (d <= R + cell && d >= R0 - cell * 1.5) o.push(i, j); } return new Float32Array(o); };
-  const mk = (cell, R0, R) => { const off = ring(cell, R0, R); return { vao: makeVAO([{ loc: 0, size: 3, data: new Float32Array(P) }, { loc: 1, size: 4, data: new Float32Array(B) }, { loc: 2, size: 2, data: off, div: 1 }], new Uint16Array(idx)), count: idx.length, n: off.length / 2, cell, R0, R }; };
+  const mk = (cell, R0, R) => { const off = ring(cell, R0, R); return { vao: makeVAO([{ loc: 0, size: 3, data: new Float32Array(P) }, { loc: 1, size: 4, data: new Float32Array(B) }, { loc: 2, size: 2, data: off, div: 1 }, { loc: 3, size: 2, data: new Float32Array(roots) }], new Uint16Array(idx)), count: idx.length, n: off.length / 2, cell, R0, R }; };
   const out = [mk(0.55, 0, Q.grassNear)];
   if (Q.grassFar > 0) out.push(mk(1.25, Q.grassNear * 0.72, Q.grassFar));
   return out;
@@ -3259,6 +3313,7 @@ const KEY = {}, INP = { jx: 0, jz: 0, run: false, lookX: 0, lookY: 0, act: false
 const MOUSE = { dx: 0, dy: 0, down: false, locked: false };
 
 function resetGame() {
+  resetPlantBrush();
   const P = G.player, [sx, sz] = PLACES.start;
   Object.assign(P, { x: sx, z: sz, y: groundAt(sx, sz), vx: 0, vy: 0, vz: 0, mode: 'walk', stamina: 1, exhausted: false, carry: true, safe: [sx, sz], rope: null });
   Object.assign(G.xu, { x: sx - 4.5, z: sz - 1.2, sit: false, look: null }); G.xu.y = groundAt(G.xu.x, G.xu.z);
@@ -3445,6 +3500,7 @@ function ropePoint(R, t) {
   return [lerp(p[k - 1][0], p[k][0], u), lerp(p[k - 1][1], p[k][1], u), lerp(p[k - 1][2], p[k][2], u)];
 }
 function respawn(msg) {
+  resetPlantBrush();
   const P = G.player; fade();
   let [x, z] = P.safe;
   const rp = roadPointAt(nearestRoadS(x, z)), roadD = Math.hypot(rp[0] - x, rp[1] - z);
@@ -3999,6 +4055,7 @@ function drawMap() {
   const P = G.player; c.save(); c.translate(X(P.x), Z(P.z)); c.rotate(-P.yaw + Math.PI); c.fillStyle = '#b8321f'; c.beginPath(); c.moveTo(0, -8); c.lineTo(5, 6); c.lineTo(-5, 6); c.closePath(); c.fill(); c.restore();
 }
 function roadWarp() {
+  resetPlantBrush();
   const P = G.player;
   const [x, z] = roadPointAt(nearestRoadS(P.x, P.z));
   Object.assign(P, { x, z, y: groundAt(x, z), mode: 'walk', vx: 0, vy: 0, vz: 0 });
@@ -4787,17 +4844,79 @@ function drawVeg(pl, camX, camZ, useFar, pg) {
 // ---- 人物姿态（每帧算一次，阴影与正片共用）----
 const BONE_POOL = Array.from({ length: 24 }, () => new Float32Array(16 * NB));
 const DRAWLIST = [];
+// 两只脚各有当前触点与一个正在回弹的旧触点，只供花草着色器使用。
+const brushBounds = new Float32Array(4);
+const brushWalkers = new Float32Array(BRUSH_WALKERS * 2);
+const brushFeet = new Float32Array(BRUSH_WALKERS * BRUSH_SAMPLES * 4);
+const brushDirections = new Float32Array(BRUSH_WALKERS * BRUSH_SAMPLES * 2);
+const brushOrigins = Array.from({ length: BRUSH_WALKERS }, () => ({ x: 0, y: 0, z: 0, at: -Infinity }));
+const brushTrails = Array.from({ length: BRUSH_WALKERS * 2 }, () => ({ x: 0, y: 0, z: 0, dirX: 0, dirZ: 0, pressure: 0, at: -Infinity }));
+
+function resetPlantBrush() {
+  for (const origin of brushOrigins) origin.at = -Infinity;
+  for (const trail of brushTrails) trail.at = -Infinity;
+}
+function storePlantContact(index, x, y, z, pressure, dirX, dirZ) {
+  const offset = index * 4;
+  brushFeet[offset] = x; brushFeet[offset + 1] = z; brushFeet[offset + 2] = y; brushFeet[offset + 3] = pressure;
+  if (pressure <= 0) return;
+  brushDirections[index * 2] = dirX; brushDirections[index * 2 + 1] = dirZ;
+  brushBounds[0] = Math.min(brushBounds[0], x - 0.41); brushBounds[2] = Math.max(brushBounds[2], x + 0.41);
+  brushBounds[1] = Math.min(brushBounds[1], z - 0.41); brushBounds[3] = Math.max(brushBounds[3], z + 0.41);
+}
+function gatherPlantBrush(walker, ch) {
+  const now = ENV.time, prev = brushOrigins[walker], elapsed = now - prev.at;
+  const dx = ch.x - prev.x, dz = ch.z - prev.z, distance = Math.hypot(dx, dz);
+  const continuous = elapsed <= 0.24 && distance < 0.85 && Math.abs(ch.y - prev.y) < 0.7;
+  const speed = continuous && elapsed > 0 ? Math.min(5, distance / elapsed) : 0;
+  prev.x = ch.x; prev.y = ch.y; prev.z = ch.z; prev.at = now;
+  const i = walker * 2, moving = speed > 0.14;
+  const dirX = moving ? dx / distance : Math.sin(ch.yaw), dirZ = moving ? dz / distance : Math.cos(ch.yaw);
+  brushWalkers[i] = ch.x; brushWalkers[i + 1] = ch.z;
+  const weight = !G.paused && ch.mode === 'walk' ? 0.46 + 0.54 * smooth(0.14, 2.2, speed) : 0;
+  for (let side = 0; side < 2; side++) {
+    const foot = _M[14 + side], trail = brushTrails[walker * 2 + side];
+    // 从脚踝沿鞋底向前取接触点，跟随现有步态。
+    const x = foot[12] + foot[8] * 0.09 - foot[4] * 0.055;
+    const y = foot[13] + foot[9] * 0.09 - foot[5] * 0.055;
+    const z = foot[14] + foot[10] * 0.09 - foot[6] * 0.055;
+    const pressure = weight ? weight * (1 - smooth(0.045, 0.22, Math.abs(y - groundAt(x, z, y)))) : 0;
+    if (!continuous) trail.at = -Infinity;
+    let remaining = trail.pressure * (1 - smooth(0.04, 0.44, now - trail.at));
+    if (pressure > 0.24 && pressure >= remaining) {
+      trail.x = x; trail.y = y; trail.z = z; trail.dirX = dirX; trail.dirZ = dirZ;
+      trail.pressure = pressure; trail.at = now;
+      remaining = pressure;
+    }
+    const index = walker * BRUSH_SAMPLES + side * 2;
+    storePlantContact(index, x, y, z, pressure, dirX, dirZ);
+    storePlantContact(index + 1, trail.x, trail.y, trail.z, remaining, trail.dirX, trail.dirZ);
+  }
+}
+function bindPlantBrush(u) {
+  gl.uniform4fv(u.uBrushBounds, brushBounds);
+  gl.uniform2fv(u.uBrushWalkers, brushWalkers);
+  gl.uniform4fv(u.uBrushFeet, brushFeet);
+  gl.uniform2fv(u.uBrushDirections, brushDirections);
+}
 function gatherChars() {
   DRAWLIST.length = 0; let k = 0;
-  const add = (mesh, ch, style) => { const B = BONE_POOL[k++]; poseCharacter(ch, style, B); DRAWLIST.push([mesh, B]); };
+  brushBounds[0] = brushBounds[1] = 1e6;
+  brushBounds[2] = brushBounds[3] = -1e6;
+  const add = (mesh, ch, style, walker = -1) => {
+    const B = BONE_POOL[k++];
+    poseCharacter(ch, style, B);
+    if (walker >= 0 && G.mode === 'play') gatherPlantBrush(walker, ch);
+    DRAWLIST.push([mesh, B]);
+  };
   const P = G.player;
   const pc = { x: P.x, y: P.y, z: P.z, yaw: P.yaw, mode: P.mode === 'walk' ? 'walk' : P.mode, phase: P.phase, speed: Math.hypot(P.vx, P.vz), carry: P.carry, anim: P.anim || (P.anim = null) };
   if (P.mode === 'climb' && P.cu) { pc.x -= P.cu[0] * 0.3; pc.z -= P.cu[1] * 0.3; }
-  add('ch_porter', pc, 'porter'); P.anim = pc.anim;
+  add('ch_porter', pc, 'porter', 0); P.anim = pc.anim;
   glbPose('porter', DRAWLIST[DRAWLIST.length - 1][1], pc);
   if (P.mode === 'walk' && pc.anim) P.phase = (pc.anim.cyc + pc.anim.ph) * 2 * Math.PI;
-  const X = G.xu, xc = { x: X.x, y: X.y, z: X.z, yaw: X.yaw, mode: X.sit ? 'sit' : 'walk', phase: X.phase, speed: X.speed, anim: X.anim || null }; add('ch_xu', xc, 'xu'); X.anim = xc.anim; glbPose('xu', DRAWLIST[DRAWLIST.length - 1][1], xc);
-  const U = G.gu, uc = { x: U.x, y: U.y, z: U.z, yaw: U.yaw, mode: 'walk', phase: U.phase, speed: U.speed, anim: U.anim || null }; add('ch_gu', uc, 'gu'); U.anim = uc.anim; glbPose('gu', DRAWLIST[DRAWLIST.length - 1][1], uc);
+  const X = G.xu, xc = { x: X.x, y: X.y, z: X.z, yaw: X.yaw, mode: X.sit ? 'sit' : 'walk', phase: X.phase, speed: X.speed, anim: X.anim || null }; add('ch_xu', xc, 'xu', 1); X.anim = xc.anim; glbPose('xu', DRAWLIST[DRAWLIST.length - 1][1], xc);
+  const U = G.gu, uc = { x: U.x, y: U.y, z: U.z, yaw: U.yaw, mode: 'walk', phase: U.phase, speed: U.speed, anim: U.anim || null }; add('ch_gu', uc, 'gu', 2); U.anim = uc.anim; glbPose('gu', DRAWLIST[DRAWLIST.length - 1][1], uc);
   for (const v of VILL) if (k < BONE_POOL.length - 1 && Math.hypot(v.x - CAM.pos[0], v.z - CAM.pos[2]) < 240) add('ch_' + v.style, v, v.style);
   if (!P.carry) { const L = G.load, B = BONE_POOL[k++], M = _M[0]; M4.ident(M); M4.translate(M, L.x, L.y, L.z); M4.rotY(M, L.ry); B.set(M, 0); DRAWLIST.push(['load', B]); }
 }
@@ -4885,7 +5004,8 @@ function render() {
   {
     const pg = PG.grass, u = pg.u; gl.useProgram(pg.p); setCommon(pg);
     bindTex(3, TEX.hgt, u.uHgt); bindTex(4, TEX.gd, u.uGD);
-    gl.uniform1f(u.uCellW, CELL); gl.uniform1f(u.uGN, GN); gl.uniform3f(u.uPlayer, G.player.x, G.player.y, G.player.z); gl.uniform3f(u.uFwd, fx / fl, 0, fz / fl);
+    gl.uniform1f(u.uCellW, CELL); gl.uniform1f(u.uGN, GN); gl.uniform3f(u.uFwd, fx / fl, 0, fz / fl);
+    bindPlantBrush(u);
     gl.uniform1f(u.uPx, RT.h / (2 * Math.tan(CAM.fov / 2))); gl.uniform1f(u.uKmax, a2c ? 4 : 1);
     if (a2c) gl.enable(gl.SAMPLE_ALPHA_TO_COVERAGE);
     for (const g of R.grass) {
@@ -4898,7 +5018,8 @@ function render() {
   if (R.flowers) {
     const pg = PG.flower, u = pg.u, F = R.flowers; gl.useProgram(pg.p); setCommon(pg);
     bindTex(3, TEX.hgt, u.uHgt); bindTex(4, TEX.gd, u.uGD);
-    gl.uniform1f(u.uCellW, CELL); gl.uniform1f(u.uGN, GN); gl.uniform3f(u.uPlayer, G.player.x, G.player.y, G.player.z); gl.uniform3f(u.uFwd, fx / fl, 0, fz / fl);
+    gl.uniform1f(u.uCellW, CELL); gl.uniform1f(u.uGN, GN); gl.uniform3f(u.uFwd, fx / fl, 0, fz / fl);
+    bindPlantBrush(u);
     gl.uniform2f(u.uCamCell, Math.floor(CAM.pos[0] / F.cell), Math.floor(CAM.pos[2] / F.cell)); gl.uniform1f(u.uGCell, F.cell); gl.uniform1f(u.uGR, F.R);
     gl.bindVertexArray(F.vao); gl.drawElementsInstanced(gl.TRIANGLES, F.count, gl.UNSIGNED_SHORT, 0, F.n);
   }
