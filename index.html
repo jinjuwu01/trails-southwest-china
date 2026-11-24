@@ -182,6 +182,8 @@ body.touchmode #chip{bottom:auto;top:auto;left:16px;bottom:16px}
 .langsw button[aria-pressed="true"]{background:var(--paper);color:var(--ink);font-weight:600}
 #bL{min-width:52px}
 #title .h1en{font:italic 500 clamp(20px,2.4vw,28px)/1.1 var(--en);color:#e9e4d6;letter-spacing:.06em;margin:-4px 0 14px}
+#title .developer{margin:0 0 14px;font:14px/1.5 var(--en);color:#d9e0dd}
+#title .developer a{color:#f4f1e8;text-underline-offset:.18em}
 .lang-en #title .h1en{font-size:clamp(30px,4.2vw,46px);font-style:normal;letter-spacing:.03em;margin-top:0}
 .lang-en #title .series .en{font-size:16px;margin-top:0}
 .lang-en #title .series .en b{font-size:18px}
@@ -306,7 +308,7 @@ body.touchmode #chip{bottom:auto;top:auto;left:16px;bottom:16px}
   #title .inner,.lang-both #title .inner{position:relative;top:auto;bottom:auto;left:auto;transform:none;margin:30vh 0 0;padding:0 20px 6px;width:auto;max-height:none;overflow:visible;display:flex;flex-direction:column}
   #title .inner>*{order:5}
   #title .inner>.series{order:0;margin-bottom:12px}
-  #title .inner>h1,#title .inner>.h1en{order:1}
+  #title .inner>h1,#title .inner>.h1en,#title .inner>.developer{order:1}
   #title .inner>.sub{order:2}
   #title .inner>.row{order:3;margin-bottom:6px}
   #title .inner>#loading{order:4;margin:0 0 14px}
@@ -325,7 +327,7 @@ body.touchmode #chip{bottom:auto;top:auto;left:16px;bottom:16px}
   #title .inner{display:flex;flex-direction:column}
   #title .inner>*{order:5}
   #title .inner>.series{order:0;margin-bottom:6px}
-  #title .inner>h1,#title .inner>.h1en{order:1}
+  #title .inner>h1,#title .inner>.h1en,#title .inner>.developer{order:1}
   #title .inner>.sub{order:2;margin-bottom:10px}
   #title .inner>.row{order:3;margin-bottom:4px}
   #title .inner>#loading{order:4;margin:0 0 10px}
@@ -344,13 +346,14 @@ body.touchmode #chip{bottom:auto;top:auto;left:16px;bottom:16px}
     <p class="series"><span class="zh"><b>西南行迹</b>：明清山河与行旅世界</span><span class="en" lang="en"><b>Trails through Southwest China:</b> Travel and Everyday Life in the Ming–Qing Era</span></p>
     <h1><span class="chapv">第一章</span>担夫之路</h1>
     <p class="h1en en" lang="en">Chapter One · The Porter’s Road</p>
+    <p class="developer" lang="en">Developer: <a href="https://ealc.illinois.edu/directory/profile/jinjuwu2" target="_blank" rel="noopener">Jinju Wu</a></p>
     <p class="sub"><span class="zh"><b>崇祯十一年四月二十三日</b> · 黔中白水河（今黄果树瀑布一带）</span><span class="en" lang="en"><b>The 23rd day of the 4th month, 11th year of Chongzhen (1638)</b> · the Baishui River, central Guizhou (today’s Huangguoshu Falls area)</span></p>
     <p class="lead zh">这一天，徐霞客从镇宁往西，经白水河铺，看见了黄果树瀑布，留下了对它最早的详细描写。替他挑行李的人，日记里只写作“担夫”。<br>今天，你就是那个担夫。拿他当天的日记当线索，到山水里把每一句话对上。</p>
     <p class="lead en" lang="en">On this day Xu Xiake traveled west from Zhenning, passed Baishuihe Post, and saw the Huangguoshu Falls, leaving the earliest detailed description of them. The man who carried his luggage appears in the diary only as “the porter.”<br>Today, you are that porter. Use Xu Xiake’s diary for that day as your clues, and match each line to the hills and waters around you.</p>
     <details class="keys" id="keys" open>
       <summary><span class="zh">操作</span><span class="en" lang="en">Controls</span></summary>
       <div class="kgrid">
-        <span>W A S D<br>↑ ↓ ← →</span><span><span class="zh">走路（前后左右）　·　Shift 跑　·　空格 跳</span><span class="en" lang="en">walk (forward, back, left, right) · Shift run · Space jump</span></span>
+        <span>↑ ↓ ← →</span><span><span class="zh">控制担夫前后左右移动　·　Shift 跑　·　空格 跳</span><span class="en" lang="en">move the porter forward, back, left and right · Shift run · Space jump</span></span>
         <span><span class="zh">鼠标</span><span class="en" lang="en">Mouse</span></span><span><span class="zh">转动视角（点一下画面锁定，Esc 释放；Z / C 也能转）　·　滚轮 远近</span><span class="en" lang="en">look around (click to lock, Esc to release; Z / C also turn) · wheel to zoom</span></span>
         <span>E</span><span><span class="zh">说话、查看、上下藤梯</span><span class="en" lang="en">talk, look, use vine ladders</span></span>
         <span>Q</span><span><span class="zh">放下 / 挑起担子（挑着担子不能攀爬、下水）</span><span class="en" lang="en">set down / pick up the load (you can’t climb or swim while carrying it)</span></span>
